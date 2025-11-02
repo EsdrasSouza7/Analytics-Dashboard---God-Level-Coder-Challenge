@@ -8,6 +8,13 @@ export function useFetchWithCache(url, dependencies = []) {
   const cache = useApiCache();
 
   useEffect(() => {
+    if (!url) {
+      setData(null);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+
     const cacheKey = `${url}-${JSON.stringify(dependencies)}`;
     const cached = cache.get(cacheKey);
     
@@ -42,7 +49,7 @@ export function useFetchWithCache(url, dependencies = []) {
     }
 
     fetchData();
-  }, [url, ...dependencies]);
+  }, [url, JSON.stringify(dependencies)]);
 
   return { data, loading, error };
 }

@@ -41,7 +41,13 @@ export function DashboardControls({ config, onConfigChange }) {
       name: 'Métricas Operacionais', 
       icon: Gauge,
       description: 'Tempos de produção e eficiência'
-    }
+    },
+    {
+      id: 'productPerformance',
+      name: 'Performance de Produtos',
+      icon: Package,
+      description: 'Análise detalhada do desempenho dos produtos'
+    },
   ];
 
   const toggleComponent = (componentId) => {

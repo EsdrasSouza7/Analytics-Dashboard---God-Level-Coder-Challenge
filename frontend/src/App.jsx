@@ -6,7 +6,9 @@ import RevenueChart from './components/RevenueChart';
 import StoreComparison from './components/StoreComparison';
 import HourHeatmap from './components/HourHeatmap';
 import DraggableDashboard from './components/DraggableDashboard';
+import { OperationalMetrics } from './components/OperationalMetrics';
 import { CustomerAnalytics } from './components/CustomerAnalytics';
+import ProductPerformance from './components/ProductPerformance';
 import { useDebounce } from './hooks/useDebounce';
 import { DashboardControls } from './components/DashboardControls';
 import { Users, GripVertical } from 'lucide-react';
@@ -22,6 +24,10 @@ function App() {
     storeStatus: 'ativas'
   });
 
+  useEffect(() => {
+    console.log('🔄 App.jsx - Filtros mudaram:', filters);
+  }, [filters]);
+
   const [dashboardConfig, setDashboardConfig] = useState(() => {
     const saved = localStorage.getItem('dashboard-config');
     if (saved) {
@@ -33,12 +39,14 @@ function App() {
           hourHeatmap: true,
           storeComparison: true,
           kpiCards: true,
-          customerAnalytics: false
+          customerAnalytics: true,
+          operationalMetrics: true,
+          productPerformance: true
         },
         layout: parsed.layout || 'single-column',
         columnLayout: parsed.columnLayout || {
-          left: ['revenueChart', 'customerAnalytics'],
-          right: ['topProducts', 'hourHeatmap', 'storeComparison']
+          left: ['revenueChart', 'customerAnalytics', 'operationalMetrics'],
+          right: ['topProducts', 'hourHeatmap', 'storeComparison', 'productPerformance']
         }
       };
     }
@@ -50,12 +58,14 @@ function App() {
         hourHeatmap: true,
         storeComparison: true,
         kpiCards: true,
-        customerAnalytics: false
+        customerAnalytics: true,
+        operationalMetrics: true,
+        productPerformance: true
       },
       layout: 'single-column',
       columnLayout: {
-        left: ['revenueChart', 'customerAnalytics'],
-        right: ['topProducts', 'hourHeatmap', 'storeComparison']
+        left: ['revenueChart', 'customerAnalytics', 'operationalMetrics'],
+        right: ['topProducts', 'hourHeatmap', 'storeComparison', 'productPerformance']
       }
     };
   });
@@ -80,8 +90,8 @@ function App() {
   const debouncedFilters = useDebounce(filters, 200);
 
   const [columnLayout, setColumnLayout] = useState({
-    left: ['revenueChart', 'customerAnalytics'],
-    right: ['topProducts', 'hourHeatmap', 'storeComparison']
+    left: ['revenueChart', 'customerAnalytics', 'operationalMetrics'],
+    right: ['topProducts', 'hourHeatmap', 'storeComparison', 'productPerformance']
   });
 
   const moveComponent = (componentId, fromColumn, toColumn) => {
@@ -153,6 +163,22 @@ function App() {
           filters={debouncedFilters}
           isMinimized={minimizedComponents.customerAnalytics}
           onMinimize={() => toggleMinimize('customerAnalytics')}
+        />
+      ),
+      operationalMetrics: (
+        <OperationalMetrics 
+          key="operational-metrics" 
+          filters={debouncedFilters}
+          isMinimized={minimizedComponents.operationalMetrics}
+          onMinimize={() => toggleMinimize('operationalMetrics')}
+        />
+      ),
+      productPerformance: (
+        <ProductPerformance 
+          key="product-performance" 
+          filters={debouncedFilters}
+          isMinimized={minimizedComponents.productPerformance}
+          onMinimize={() => toggleMinimize('productPerformance')}
         />
       ),
     };
@@ -274,6 +300,12 @@ function App() {
               )}
               {dashboardConfig.visibleComponents.customerAnalytics && (
                 <CustomerAnalytics key="customer-analytics" filters={debouncedFilters} />
+              )}
+              {dashboardConfig.visibleComponents.operationalMetrics && (
+                <OperationalMetrics key="operational-metrics" filters={debouncedFilters} />
+              )}
+              {dashboardConfig.visibleComponents.productPerformance && (
+                <ProductPerformance key="product-performance" filters={debouncedFilters} />
               )}
             </DraggableDashboard>
           )}

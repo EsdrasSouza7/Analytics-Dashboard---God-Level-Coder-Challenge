@@ -142,20 +142,25 @@ router.get('/metrics', async (req, res) => {
 
     if (req.query.startDate && req.query.endDate) {
       // Datas customizadas - comparar com período anterior de mesma duração
-      const start = new Date(req.query.startDate);
-      const end = new Date(req.query.endDate);
-      const diffDays = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
+      const start = new Date(req.query.startDate + 'T00:00:00');
+      const end = new Date(req.query.endDate + 'T23:59:59.999');
       
+      // Calcular duração em dias (incluindo start e end)
+      const diffDays = Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1;
+      
+      // Período anterior
       const previousStart = new Date(start);
       previousStart.setDate(previousStart.getDate() - diffDays);
+      
       const previousEnd = new Date(start);
       previousEnd.setDate(previousEnd.getDate() - 1);
+      previousEnd.setHours(23, 59, 59, 999);
 
       let paramCount = compareBaseValues.length + 1;
       compareValues = [
         ...compareBaseValues,
-        previousStart.toISOString().split('T')[0],
-        previousEnd.toISOString().split('T')[0]
+        previousStart.toISOString(),
+        previousEnd.toISOString()
       ];
 
       compareQuery = `
@@ -166,7 +171,8 @@ router.get('/metrics', async (req, res) => {
         JOIN channels c ON s.channel_id = c.id
         JOIN stores st ON s.store_id = st.id
         ${compareWhereBase}
-        AND s.created_at BETWEEN $${paramCount} AND $${paramCount + 1}
+        AND s.created_at >= $${paramCount}
+        AND s.created_at <= $${paramCount + 1}
       `;
     } else {
       // Período padrão (30d, 90d, etc)
@@ -176,8 +182,13 @@ router.get('/metrics', async (req, res) => {
         throw new Error('Período inválido');
       }
 
+      // Para comparar: período anterior de mesma duração
+      const startDaysAgo = periodDays * 2;  // início do período anterior
+      const endDaysAgo = periodDays;        // fim do período anterior
+      
+      compareValues = [...compareBaseValues, startDaysAgo, endDaysAgo];
+      
       let paramCount = compareBaseValues.length + 1;
-      compareValues = [...compareBaseValues, periodDays * 2, periodDays];
 
       compareQuery = `
         SELECT 
@@ -187,8 +198,8 @@ router.get('/metrics', async (req, res) => {
         JOIN channels c ON s.channel_id = c.id
         JOIN stores st ON s.store_id = st.id
         ${compareWhereBase}
-        AND s.created_at >= NOW() - INTERVAL $${paramCount} || ' days'
-        AND s.created_at < NOW() - INTERVAL $${paramCount + 1} || ' days'
+        AND s.created_at >= NOW() - INTERVAL '1 day' * $${paramCount}
+        AND s.created_at < NOW() - INTERVAL '1 day' * $${paramCount + 1}
       `;
     }
 
@@ -765,6 +776,530 @@ router.get('/customer-segmentation', async (req, res) => {
   } catch (error) {
     console.error('Erro em /customer-segmentation:', error);
     res.status(500).json({ error: 'Erro ao buscar segmentação' });
+  }
+});
+
+// Função auxiliar para construir WHERE sem excluir cancelados
+function buildWhereClauseIncludingCancelled(queryParams) {
+  const conditions = [];
+  const values = [];
+  let paramCount = 1;
+
+  // Lojas
+  if (queryParams.storeIds) {
+    const storeIds = queryParams.storeIds.split(',').map(id => parseInt(id));
+    conditions.push(`st.id = ANY($${paramCount})`);
+    values.push(storeIds);
+    paramCount++;
+  }
+
+  // Canais
+  if (queryParams.channelIds) {
+    const channelIds = queryParams.channelIds.split(',').map(id => parseInt(id));
+    conditions.push(`c.id = ANY($${paramCount})`);
+    values.push(channelIds);
+    paramCount++;
+  }
+
+  // Período ou datas customizadas
+  if (queryParams.startDate && queryParams.endDate) {
+    const start = new Date(queryParams.startDate + 'T00:00:00');
+    const end = new Date(queryParams.endDate + 'T23:59:59.999');
+    
+    conditions.push(`s.created_at >= $${paramCount}`);
+    values.push(start.toISOString());
+    paramCount++;
+    
+    conditions.push(`s.created_at <= $${paramCount}`);
+    values.push(end.toISOString());
+    paramCount++;
+  } else if (queryParams.period) {
+    const periodDays = parseInt(queryParams.period.replace(/\D/g, '') || '30');
+    
+    const endDate = new Date();
+    endDate.setHours(23, 59, 59, 999);
+    
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - (periodDays - 1));
+    startDate.setHours(0, 0, 0, 0);
+    
+    conditions.push(`s.created_at >= $${paramCount}`);
+    values.push(startDate.toISOString());
+    paramCount++;
+    
+    conditions.push(`s.created_at <= $${paramCount}`);
+    values.push(endDate.toISOString());
+    paramCount++;
+  }
+
+  const whereClause = conditions.length > 0 
+    ? 'WHERE ' + conditions.join(' AND ')
+    : '';
+
+  return { whereClause, values };
+}
+
+// 📊 Métricas Operacionais Gerais
+router.get('/operational-metrics', async (req, res) => {
+  try {
+    const { whereClause, values } = buildWhereClauseIncludingCancelled(req.query);
+
+    const query = `
+      SELECT 
+        -- Tempos médios
+        AVG(s.production_seconds) as tempo_medio_producao,
+        AVG(s.delivery_seconds) as tempo_medio_entrega,
+        
+        -- Taxa de cancelamento
+        COUNT(CASE WHEN s.sale_status_desc IN ('CANCELADO', 'CANCELLED') THEN 1 END)::decimal / 
+        NULLIF(COUNT(*), 0) as taxa_cancelamento,
+        
+        -- Total de cancelamentos
+        COUNT(CASE WHEN s.sale_status_desc IN ('CANCELADO', 'CANCELLED') THEN 1 END) as total_cancelamentos,
+        
+        -- Produtividade (pedidos por hora)
+        COUNT(*) / GREATEST(EXTRACT(EPOCH FROM (MAX(s.created_at) - MIN(s.created_at))) / 3600, 1) as pedidos_por_hora,
+        
+        -- Eficiência geral (baseada em tempos)
+        CASE 
+          WHEN AVG(s.production_seconds) > 0 
+          THEN GREATEST(0, 1 - (AVG(s.production_seconds) - 1200) / 1200) -- Meta: 20 minutos
+          ELSE 0.8 
+        END as eficiencia_geral
+
+      FROM sales s
+      JOIN channels c ON s.channel_id = c.id
+      JOIN stores st ON s.store_id = st.id
+      ${whereClause}
+    `;
+
+    const result = await pool.query(query, values);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Erro em /operational-metrics:', error);
+    res.status(500).json({ error: 'Erro ao buscar métricas operacionais' });
+  }
+});
+
+// ⏰ Dados por Horário
+router.get('/operational-by-hour', async (req, res) => {
+  try {
+    const { whereClause, values } = buildWhereClause(req.query);
+
+    const query = `
+      SELECT 
+        EXTRACT(HOUR FROM s.created_at) as hora,
+        AVG(s.production_seconds) as tempo_medio_producao,
+        AVG(s.delivery_seconds) as tempo_medio_entrega,
+        COUNT(*) as total_pedidos,
+        COUNT(CASE WHEN s.sale_status_desc IN ('CANCELADO', 'CANCELLED') THEN 1 END) as cancelamentos
+      FROM sales s
+      JOIN channels c ON s.channel_id = c.id
+      JOIN stores st ON s.store_id = st.id
+      ${whereClause}
+      GROUP BY EXTRACT(HOUR FROM s.created_at)
+      ORDER BY hora
+    `;
+
+    const result = await pool.query(query, values);
+    
+    const data = result.rows.map(row => ({
+      hora: parseInt(row.hora),
+      tempo_medio_producao: parseInt(row.tempo_medio_producao || 0),
+      tempo_medio_entrega: parseInt(row.tempo_medio_entrega || 0),
+      total_pedidos: parseInt(row.total_pedidos),
+      cancelamentos: parseInt(row.cancelamentos)
+    }));
+
+    res.json(data);
+  } catch (error) {
+    console.error('Erro em /operational-by-hour:', error);
+    res.status(500).json({ error: 'Erro ao buscar dados por horário' });
+  }
+});
+
+// ❌ Métricas de Cancelamento
+router.get('/cancellation-metrics', async (req, res) => {
+  try {
+    // IMPORTANTE: Usar função que NÃO exclui cancelados
+    const { whereClause, values } = buildWhereClauseIncludingCancelled(req.query);
+    console.log(whereClause, values);
+
+    const query = `
+      WITH base_data AS (
+        SELECT 
+          s.*,
+          c.name as channel_name,
+          st.name as store_name
+        FROM sales s
+        JOIN channels c ON s.channel_id = c.id
+        JOIN stores st ON s.store_id = st.id
+        ${whereClause}
+      ),
+      metricas_gerais AS (
+        SELECT 
+          COUNT(*) as total_pedidos,
+          COUNT(CASE WHEN sale_status_desc IN ('CANCELADO', 'CANCELLED') THEN 1 END) as total_cancelamentos,
+          COUNT(CASE WHEN sale_status_desc IN ('CANCELADO', 'CANCELLED') THEN 1 END)::decimal / 
+          NULLIF(COUNT(*), 0) as taxa_cancelamento_geral
+        FROM base_data
+      ),
+      cancelamentos_por_motivo AS (
+        SELECT 
+          COALESCE(discount_reason, 'Sem motivo informado') as motivo,
+          COUNT(*) as quantidade
+        FROM base_data
+        WHERE sale_status_desc IN ('CANCELADO', 'CANCELLED')
+        GROUP BY discount_reason
+        ORDER BY quantidade DESC
+        LIMIT 10
+      ),
+      cancelamentos_por_hora AS (
+        SELECT 
+          EXTRACT(HOUR FROM created_at)::integer as hora,
+          COUNT(*) as total_hora,
+          COUNT(CASE WHEN sale_status_desc IN ('CANCELADO', 'CANCELLED') THEN 1 END) as cancelamentos_hora,
+          COUNT(CASE WHEN sale_status_desc IN ('CANCELADO', 'CANCELLED') THEN 1 END)::decimal / 
+          NULLIF(COUNT(*), 0) as taxa_cancelamento
+        FROM base_data
+        GROUP BY EXTRACT(HOUR FROM created_at)
+        ORDER BY hora
+      )
+      SELECT 
+        mg.total_pedidos,
+        mg.total_cancelamentos,
+        mg.taxa_cancelamento_geral,
+        COALESCE(
+          (SELECT json_agg(
+            json_build_object(
+              'motivo', motivo,
+              'quantidade', quantidade
+            )
+          ) FROM cancelamentos_por_motivo),
+          '[]'::json
+        ) as cancelamentos_por_motivo,
+        COALESCE(
+          (SELECT json_agg(
+            json_build_object(
+              'hora', hora,
+              'total_hora', total_hora,
+              'cancelamentos_hora', cancelamentos_hora,
+              'taxa_cancelamento', taxa_cancelamento
+            )
+          ) FROM cancelamentos_por_hora),
+          '[]'::json
+        ) as cancelamentos_por_hora
+      FROM metricas_gerais mg
+    `;
+
+    const result = await pool.query(query, values);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Erro em /cancellation-metrics:', error);
+    res.status(500).json({ error: 'Erro ao buscar métricas de cancelamento' });
+  }
+});
+
+
+
+
+
+// 💰 Produtos Mais Lucrativos (baseado em receita)
+router.get('/profitable-products', async (req, res) => {
+  try {
+    const { whereClause, values } = buildWhereClause(req.query);
+    const limit = parseInt(req.query.limit) || 20;
+
+    const query = `
+      WITH produto_dados AS (
+        SELECT 
+          p.id,
+          p.name,
+          COALESCE(cat.name, 'Sem Categoria') as categoria,
+          COUNT(DISTINCT ps.sale_id) as vendas,
+          SUM(ps.quantity) as quantidade,
+          SUM(ps.total_price) as receita,
+          AVG(ps.total_price) as preco_medio
+        FROM product_sales ps
+        JOIN products p ON ps.product_id = p.id
+        LEFT JOIN categories cat ON p.category_id = cat.id
+        JOIN sales s ON ps.sale_id = s.id
+        JOIN channels c ON s.channel_id = c.id
+        JOIN stores st ON s.store_id = st.id
+        ${whereClause}
+        GROUP BY p.id, p.name, cat.name
+      ),
+      categoria_receitas AS (
+        SELECT 
+          categoria,
+          SUM(receita) as receita_categoria
+        FROM produto_dados
+        GROUP BY categoria
+      )
+      SELECT 
+        pd.*,
+        COALESCE(pd.receita / NULLIF(cr.receita_categoria, 0), 0) as percentual_categoria,
+        ROW_NUMBER() OVER (ORDER BY pd.receita DESC) as ranking
+      FROM produto_dados pd
+      LEFT JOIN categoria_receitas cr ON pd.categoria = cr.categoria
+      ORDER BY pd.receita DESC
+      LIMIT $${values.length + 1}
+    `;
+
+    const result = await pool.query(query, [...values, limit]);
+    
+    const data = result.rows.map(row => ({
+      id: parseInt(row.ranking),
+      name: row.name,
+      categoria: row.categoria,
+      vendas: parseInt(row.vendas),
+      quantidade: parseFloat(row.quantidade),
+      receita: parseFloat(row.receita),
+      precoMedio: parseFloat(row.preco_medio),
+      percentual_categoria: parseFloat(row.percentual_categoria)
+    }));
+
+    res.json(data);
+  } catch (error) {
+    console.error('Erro em /profitable-products:', error);
+    res.status(500).json({ error: 'Erro ao buscar produtos lucrativos' });
+  }
+});
+
+// 📈 Sazonalidade dos Produtos
+router.get('/product-seasonality', async (req, res) => {
+  try {
+    const { whereClause, values } = buildWhereClause(req.query);
+    
+    const interval =  'day';
+    
+    // Query principal - dados por período
+    const timeSeriesQuery = `
+      SELECT 
+        DATE_TRUNC('${interval}', s.created_at) as periodo,
+        COUNT(DISTINCT ps.product_id) as produtos_unicos,
+        SUM(ps.quantity) as quantidade_total,
+        SUM(ps.total_price) as receita_total,
+        COUNT(DISTINCT ps.sale_id) as total_pedidos
+      FROM product_sales ps
+      JOIN products p ON ps.product_id = p.id
+      JOIN sales s ON ps.sale_id = s.id
+      JOIN channels c ON s.channel_id = c.id
+      JOIN stores st ON s.store_id = st.id
+      ${whereClause}
+      GROUP BY DATE_TRUNC('${interval}', s.created_at)
+      ORDER BY periodo
+    `;
+
+    // Query de produtos sazonais - produtos com maior variação
+    const seasonalProductsQuery = `
+      WITH produto_periodos AS (
+        SELECT 
+          p.name as nome,
+          DATE_TRUNC('${interval}', s.created_at) as periodo,
+          SUM(ps.quantity) as quantidade
+        FROM product_sales ps
+        JOIN products p ON ps.product_id = p.id
+        JOIN sales s ON ps.sale_id = s.id
+        JOIN channels c ON s.channel_id = c.id
+        JOIN stores st ON s.store_id = st.id
+        ${whereClause}
+        GROUP BY p.name, DATE_TRUNC('${interval}', s.created_at)
+      ),
+      produto_stats AS (
+        SELECT 
+          nome,
+          AVG(quantidade) as media,
+          STDDEV(quantidade) as desvio,
+          MAX(quantidade) as maximo,
+          MIN(quantidade) as minimo
+        FROM produto_periodos
+        GROUP BY nome
+        HAVING COUNT(*) >= 2 AND STDDEV(quantidade) > 0
+      )
+      SELECT 
+        nome,
+        COALESCE((maximo - minimo) / NULLIF(media, 0), 0) as variacao
+      FROM produto_stats
+      WHERE media > 0
+      ORDER BY variacao DESC
+      LIMIT 10
+    `;
+
+    const [timeSeriesResult, seasonalResult] = await Promise.all([
+      pool.query(timeSeriesQuery, values),
+      pool.query(seasonalProductsQuery, values)
+    ]);
+    
+    const timeSeries = timeSeriesResult.rows.map(row => ({
+      periodo: new Date(row.periodo).toLocaleDateString('pt-BR'),
+      produtos_unicos: parseInt(row.produtos_unicos),
+      quantidade: parseFloat(row.quantidade_total),
+      receita: parseFloat(row.receita_total),
+      vendas: parseInt(row.total_pedidos)
+    }));
+
+    const topSazonais = seasonalResult.rows.map(row => ({
+      nome: row.nome,
+      variacao: parseFloat(row.variacao)
+    }));
+
+    res.json({
+      timeSeries: timeSeries,
+      top_sazonais: topSazonais
+    });
+  } catch (error) {
+    console.error('Erro em /product-seasonality:', error);
+    res.status(500).json({ error: 'Erro ao buscar sazonalidade' });
+  }
+});
+
+// 🔄 Combinações de Produtos
+router.get('/product-combinations', async (req, res) => {
+  try {
+    const { whereClause, values } = buildWhereClause(req.query);
+    const limit = parseInt(req.query.limit) || 15;
+
+    const query = `
+      WITH pedidos_validos AS (
+        SELECT DISTINCT s.id as sale_id
+        FROM sales s
+        JOIN channels c ON s.channel_id = c.id
+        JOIN stores st ON s.store_id = st.id
+        ${whereClause}
+      ),
+      combinacoes AS (
+        SELECT 
+          p1.name as produto_principal,
+          p2.name as item_combinado,
+          COUNT(DISTINCT ps1.sale_id) as frequencia,
+          -- Calcular receita total da combinação
+          SUM(ps1.total_price + ps2.total_price) as receita_total,
+          -- Calcular ticket médio da combinação
+          AVG(ps1.total_price + ps2.total_price) as ticket_medio_combinacao,
+          -- IDs dos pedidos para calcular métricas adicionais
+          ARRAY_AGG(DISTINCT ps1.sale_id) as pedidos_ids
+        FROM product_sales ps1
+        JOIN products p1 ON ps1.product_id = p1.id
+        JOIN product_sales ps2 ON ps1.sale_id = ps2.sale_id AND ps1.product_id < ps2.product_id
+        JOIN products p2 ON ps2.product_id = p2.id
+        JOIN pedidos_validos pv ON ps1.sale_id = pv.sale_id
+        GROUP BY p1.name, p2.name
+        HAVING COUNT(DISTINCT ps1.sale_id) > 1
+      ),
+      total_pedidos AS (
+        SELECT COUNT(*) as total FROM pedidos_validos
+      ),
+      -- Calcular receita média individual dos produtos
+      produto_stats AS (
+        SELECT 
+          p.name as produto,
+          AVG(ps.total_price) as preco_medio_individual
+        FROM product_sales ps
+        JOIN products p ON ps.product_id = p.id
+        JOIN pedidos_validos pv ON ps.sale_id = pv.sale_id
+        GROUP BY p.name
+      )
+      SELECT 
+        c.produto_principal,
+        c.item_combinado,
+        c.frequencia,
+        COALESCE(c.frequencia::decimal / NULLIF(tp.total, 0), 0) as percentual_pedidos,
+        c.receita_total,
+        c.ticket_medio_combinacao,
+        -- Preços médios individuais para comparação
+        ps1.preco_medio_individual as preco_medio_principal,
+        ps2.preco_medio_individual as preco_medio_combinado,
+        -- Calcular incremento no ticket
+        (c.ticket_medio_combinacao - COALESCE(ps1.preco_medio_individual, 0) - COALESCE(ps2.preco_medio_individual, 0)) as incremento_ticket,
+        -- Score melhorado considerando frequência e receita
+        (c.frequencia * 0.6 + (c.receita_total / 100) * 0.4) as score_combinacao
+      FROM combinacoes c
+      CROSS JOIN total_pedidos tp
+      LEFT JOIN produto_stats ps1 ON c.produto_principal = ps1.produto
+      LEFT JOIN produto_stats ps2 ON c.item_combinado = ps2.produto
+      ORDER BY c.receita_total DESC, c.frequencia DESC
+      LIMIT $${values.length + 1}
+    `;
+
+    console.log('✅ Query product-combinations com métricas financeiras');
+    
+    const result = await pool.query(query, [...values, limit]);
+    
+    const data = result.rows.map(row => ({
+      produto_principal: row.produto_principal,
+      item_combinado: row.item_combinado,
+      frequencia: parseInt(row.frequencia),
+      percentual_pedidos: parseFloat(row.percentual_pedidos),
+      receita_total: parseFloat(row.receita_total),
+      ticket_medio_combinacao: parseFloat(row.ticket_medio_combinacao),
+      preco_medio_principal: parseFloat(row.preco_medio_principal),
+      preco_medio_combinado: parseFloat(row.preco_medio_combinado),
+      incremento_ticket: parseFloat(row.incremento_ticket),
+      score: parseFloat(row.score_combinacao)
+    }));
+
+    console.log(`✅ Encontradas ${data.length} combinações`);
+    res.json(data);
+  } catch (error) {
+    console.error('❌ Erro em /product-combinations:', error);
+    res.status(500).json({ 
+      error: 'Erro ao buscar combinações',
+      details: error.message 
+    });
+  }
+});
+
+// 🗂️ Performance por Categoria
+router.get('/category-performance', async (req, res) => {
+  try {
+    const { whereClause, values } = buildWhereClause(req.query);
+
+    const query = `
+      WITH categoria_dados AS (
+        SELECT 
+          COALESCE(cat.name, 'Sem Categoria') as categoria,
+          COUNT(DISTINCT ps.product_id) as produtos_unicos,
+          SUM(ps.quantity) as quantidade,
+          COUNT(DISTINCT ps.sale_id) as pedidos,
+          SUM(ps.total_price) as receita,
+          AVG(ps.total_price) as ticket_medio
+        FROM product_sales ps
+        JOIN products p ON ps.product_id = p.id
+        LEFT JOIN categories cat ON p.category_id = cat.id
+        JOIN sales s ON ps.sale_id = s.id
+        JOIN channels c ON s.channel_id = c.id
+        JOIN stores st ON s.store_id = st.id
+        ${whereClause}
+        GROUP BY cat.name
+      ),
+      receita_total AS (
+        SELECT SUM(receita) as total FROM categoria_dados
+      )
+      SELECT 
+        cd.*,
+        COALESCE(cd.receita / NULLIF(rt.total, 0), 0) as percentual_receita
+      FROM categoria_dados cd
+      CROSS JOIN receita_total rt
+      ORDER BY cd.receita DESC
+    `;
+
+    const result = await pool.query(query, values);
+    
+    const data = result.rows.map(row => ({
+      categoria: row.categoria,
+      produtos_unicos: parseInt(row.produtos_unicos),
+      quantidade: parseFloat(row.quantidade),
+      pedidos: parseInt(row.pedidos),
+      receita: parseFloat(row.receita),
+      ticket_medio: parseFloat(row.ticket_medio),
+      percentual_receita: parseFloat(row.percentual_receita)
+    }));
+
+    res.json(data);
+  } catch (error) {
+    console.error('Erro em /category-performance:', error);
+    res.status(500).json({ error: 'Erro ao buscar performance por categoria' });
   }
 });
 

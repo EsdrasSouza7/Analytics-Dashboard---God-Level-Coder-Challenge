@@ -6,8 +6,10 @@ import { KPICardsSkeleton } from './LoadingSpinner';
 export function KPICards({ filters }) {
   const params = new URLSearchParams();
   if (filters.startDate && filters.endDate) {
-    params.append(`startDate=${filters.startDate}&endDate=${filters.endDate}`)
-  }else if (filters.period) {
+    params.append('startDate', filters.startDate);
+    params.append('endDate', filters.endDate);
+  }
+  if (filters.period && (!filters.startDate || !filters.endDate)) {
     params.append('period', filters.period);
   }
   if (filters.channel && filters.channel !== 'todos') {
