@@ -10,7 +10,6 @@ const router = express.Router();
 //Conexão com Google Gemini AI
 if (!process.env.GOOGLE_AI_API_KEY) {
   console.error('❌ ERRO: GOOGLE_AI_API_KEY não encontrada no .env');
-  process.exit(1);
 }
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY);
