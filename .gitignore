@@ -1,2 +1,7 @@
 /api_backend.js
 /api_frontend.js
+
+*.env
+*.env.local
+
+node_modules/

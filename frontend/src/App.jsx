@@ -11,6 +11,7 @@ import { CustomerAnalytics } from './components/CustomerAnalytics';
 import ProductPerformance from './components/ProductPerformance';
 import { PeriodComparison } from './components/PeriodComparison';
 import { DeliveryMetrics } from './components/DeliveryMetrics';
+import { AIQueryBuilder }  from './components/AIQueryBuilder';
 import { DashboardControls } from './components/DashboardControls';
 import { DraggableColumnItem } from './components/DraggableColumnItem';
 import { useDebounce } from './hooks/useDebounce';
@@ -36,6 +37,7 @@ function App() {
     }
     return {
       visibleComponents: {
+        aiQueryBuilder: true,
         revenueChart: true,
         topProducts: true,
         hourHeatmap: true,
@@ -49,7 +51,7 @@ function App() {
       },
       layout: 'single-column',
       columnLayout: {
-        left: ['revenueChart', 'periodComparison', 'customerAnalytics', 'operationalMetrics'],
+        left: ['aiQueryBuilder', 'revenueChart', 'periodComparison', 'customerAnalytics', 'operationalMetrics'],
         right: ['topProducts', 'hourHeatmap', 'storeComparison', 'productPerformance', 'deliveryMetrics']
       },
       minimizedComponents: {}
@@ -104,6 +106,14 @@ function App() {
     };
 
     const componentMap = {
+      aiQueryBuilder: (
+        <AIQueryBuilder 
+          key="ai-query-builder" 
+          filters={debouncedFilters}
+          isMinimized={dashboardConfig.minimizedComponents?.aiQueryBuilder}
+          onMinimize={() => toggleMinimize('aiQueryBuilder')}
+        />
+      ),
       revenueChart: (
         <RevenueChart 
           key="revenue-chart" 
@@ -273,6 +283,12 @@ function App() {
             dashboardConfig={dashboardConfig}
             onConfigChange={setDashboardConfig}
           >
+            {dashboardConfig.visibleComponents.aiQueryBuilder && (
+              <AIQueryBuilder 
+                key="ai-query-builder" 
+                filters={debouncedFilters}
+              />
+            )}
             {dashboardConfig.visibleComponents.revenueChart && (
               <RevenueChart 
                 key="revenue-chart" 

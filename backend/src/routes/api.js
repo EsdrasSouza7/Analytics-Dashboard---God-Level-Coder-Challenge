@@ -1,7 +1,20 @@
 import express from 'express';
 import pool from '../config/database.js';
+import dotenv from 'dotenv';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+
+dotenv.config();
 
 const router = express.Router();
+
+//Conexão com Google Gemini AI
+if (!process.env.GOOGLE_AI_API_KEY) {
+  console.error('❌ ERRO: GOOGLE_AI_API_KEY não encontrada no .env');
+  process.exit(1);
+}
+
+const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY);
+console.log('✅ Gemini AI inicializado com sucesso');
 
 // Cache simples in-memory
 const cache = new Map();
@@ -1927,6 +1940,179 @@ router.get('/delivery-timing', async (req, res) => {
     res.status(500).json({ 
       error: 'Erro ao buscar análise temporal de delivery',
       details: error.message
+    });
+  }
+});
+
+// 🤖 Endpoint: Query com IA - COM SEGURANÇA
+router.post('/ai-query', async (req, res) => {
+  try {
+    const { question } = req.body;
+    
+    if (!question) {
+      return res.status(400).json({ error: 'Pergunta é obrigatória' });
+    }
+
+    console.log('🤖 Pergunta do usuário:', question);
+
+    // Contexto do schema do banco
+    const schemaContext = `
+Você é um assistente SQL especializado em analytics de restaurantes.
+
+⚠️ RESTRIÇÕES DE SEGURANÇA CRÍTICAS:
+- APENAS queries SELECT são permitidas
+- NUNCA use: CREATE, DROP, DELETE, UPDATE, INSERT, ALTER, TRUNCATE, GRANT, REVOKE
+- NUNCA modifique dados, apenas leia
+- Se o usuário pedir para modificar/deletar/criar, responda apenas com: "SECURITY_VIOLATION"
+
+SCHEMA DO BANCO DE DADOS:
+- sales: id, store_id, channel_id, customer_id, created_at, total_amount, total_discount, service_tax_fee, delivery_fee, sale_status_desc, production_seconds, delivery_seconds
+- products: id, name, category_id
+- categories: id, name
+- channels: id, name, type (P=Presencial, D=Delivery)
+- stores: id, name, city, state
+- customers: id, customer_name, email, phone_number
+- product_sales: id, sale_id, product_id, quantity, total_price
+- payments: id, sale_id, payment_type_id, value, is_online
+- payment_types: id, description
+
+REGRAS:
+1. Sempre use JOINs quando necessário
+2. Filtre vendas canceladas: WHERE sale_status_desc NOT IN ('CANCELADO', 'CANCELLED')
+3. Use aliases legíveis (ex: total_vendas, receita_total)
+4. Para datas use: created_at >= NOW() - INTERVAL 'X days'
+5. Retorne APENAS o SQL SELECT, sem explicações
+6. Use agregações quando apropriado (SUM, AVG, COUNT)
+7. LIMITE resultados a 1000 linhas com LIMIT 1000
+
+EXEMPLOS VÁLIDOS:
+- "vendas do último mês" → WHERE created_at >= NOW() - INTERVAL '30 days'
+- "por canal" → GROUP BY c.name
+- "ticket médio" → AVG(total_amount)
+`;
+
+    // Gerar SQL com Gemini
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+    
+    const prompt = `${schemaContext}
+
+PERGUNTA DO USUÁRIO: ${question}
+
+Gere APENAS a query SQL SELECT (sem markdown, sem explicação):`;
+
+    const result = await model.generateContent(prompt);
+    let sqlQuery = result.response.text()
+      .replace(/```sql/g, '')
+      .replace(/```/g, '')
+      .trim();
+
+    console.log('📝 SQL gerado pela IA:', sqlQuery);
+
+    // ⚠️ VALIDAÇÃO DE SEGURANÇA 1: Verificar se IA detectou violação
+    if (sqlQuery.includes('SECURITY_VIOLATION')) {
+      console.log('🚫 IA detectou tentativa de violação de segurança');
+      return res.status(403).json({
+        error: 'Operação não permitida',
+        message: 'Apenas consultas de leitura (SELECT) são permitidas. Não é possível modificar, criar ou deletar dados.',
+        question
+      });
+    }
+
+    // ⚠️ VALIDAÇÃO DE SEGURANÇA 2: Lista de comandos proibidos
+    const dangerousKeywords = [
+      'CREATE ', 'DROP ', 'DELETE ', 'UPDATE ', 'INSERT ', 
+      'ALTER ', 'TRUNCATE ', 'GRANT ', 'REVOKE ', 'EXEC ',
+      'EXECUTE ', 'PROCEDURE ', 'FUNCTION ', 'TRIGGER ',
+      'INDEX ', 'VIEW ', 'DATABASE ', 'TABLE ', 'SCHEMA ',
+      '--', '/*', '*/', 'UNION ', 'INTO '  // Prevenir SQL injection
+    ];
+
+    const upperQuery = sqlQuery.toUpperCase();
+    const foundDangerousKeyword = dangerousKeywords.find(keyword => 
+      upperQuery.includes(keyword)
+    );
+
+    if (foundDangerousKeyword) {
+      console.log('🚫 Palavra-chave perigosa detectada:', foundDangerousKeyword);
+      return res.status(403).json({
+        error: 'Query bloqueada por segurança',
+        message: `A query contém o comando proibido: ${foundDangerousKeyword}. Apenas consultas SELECT são permitidas.`,
+        blockedKeyword: foundDangerousKeyword,
+        question
+      });
+    }
+
+    // ⚠️ VALIDAÇÃO DE SEGURANÇA 3: Deve começar com SELECT
+    if (!upperQuery.trim().startsWith('SELECT')) {
+      console.log('🚫 Query não começa com SELECT');
+      return res.status(403).json({
+        error: 'Query inválida',
+        message: 'Apenas queries SELECT são permitidas. A query deve começar com SELECT.',
+        question
+      });
+    }
+
+    // ⚠️ VALIDAÇÃO DE SEGURANÇA 4: Adicionar LIMIT se não tiver
+    if (!upperQuery.includes('LIMIT')) {
+      sqlQuery += ' LIMIT 1000';
+      console.log('⚠️ LIMIT 1000 adicionado automaticamente');
+    }
+
+    // ⚠️ VALIDAÇÃO DE SEGURANÇA 5: Bloquear múltiplos statements
+    if (sqlQuery.includes(';') && sqlQuery.trim().indexOf(';') !== sqlQuery.trim().length - 1) {
+      console.log('🚫 Múltiplos statements SQL detectados');
+      return res.status(403).json({
+        error: 'Múltiplos statements não permitidos',
+        message: 'Apenas uma query SELECT por vez é permitida.',
+        question
+      });
+    }
+
+    console.log('✅ Query passou por todas as validações de segurança');
+
+    // Executar query COM TIMEOUT
+    const queryResult = await pool.query({
+      text: sqlQuery,
+      rowMode: 'array'
+    });
+    
+    // Converter resultado para formato objeto
+    const fields = queryResult.fields.map(f => f.name);
+    const rows = queryResult.rows.map(row => {
+      const obj = {};
+      fields.forEach((field, i) => {
+        obj[field] = row[i];
+      });
+      return obj;
+    });
+
+    console.log(`✅ Query executada: ${rows.length} resultados`);
+
+    // Log de auditoria
+    console.log('📊 AUDIT LOG:', {
+      timestamp: new Date().toISOString(),
+      question,
+      sql: sqlQuery,
+      rowCount: rows.length,
+      ip: req.ip
+    });
+
+    // Retornar dados
+    res.json({
+      question,
+      sql: sqlQuery,
+      data: rows,
+      rowCount: rows.length
+    });
+
+  } catch (error) {
+    console.error('❌ Erro no AI Query:', error);
+    
+    // Não expor detalhes do erro SQL ao usuário
+    res.status(500).json({ 
+      error: 'Erro ao processar query',
+      message: 'Houve um erro ao executar a consulta. Tente reformular sua pergunta.',
+      question: req.body.question
     });
   }
 });

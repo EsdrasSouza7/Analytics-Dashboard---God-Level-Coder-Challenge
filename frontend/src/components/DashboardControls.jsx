@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Plus, Columns, X, Search, BarChart3, Users, Store, Clock, Package, Gauge, TrendingUp, Download } from 'lucide-react';
+import { Plus, Columns, X, Search, BarChart3, Users, Store, Clock, Package, Gauge, TrendingUp, Download, Sparkles } from 'lucide-react';
 
 export function DashboardControls({ config, onConfigChange, onExport }) {
   const [showModal, setShowModal] = useState(false);
@@ -46,6 +46,14 @@ export function DashboardControls({ config, onConfigChange, onExport }) {
   };
 
   const availableComponents = [
+    { 
+      id: 'aiQueryBuilder', 
+      name: 'AI Query Builder (BETA)', 
+      icon: Sparkles,  // Importar: import { Sparkles } from 'lucide-react'
+      category: 'financial',
+      description: 'Faça perguntas em linguagem natural e a IA gera análises',
+      tags: ['IA', 'AI', 'perguntas', 'natural']
+    },
     { 
       id: 'revenueChart', 
       name: 'Gráfico de Receita', 
