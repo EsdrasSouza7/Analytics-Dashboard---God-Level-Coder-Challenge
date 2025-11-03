@@ -9,10 +9,13 @@ import DraggableDashboard from './components/DraggableDashboard';
 import { OperationalMetrics } from './components/OperationalMetrics';
 import { CustomerAnalytics } from './components/CustomerAnalytics';
 import ProductPerformance from './components/ProductPerformance';
-import { useDebounce } from './hooks/useDebounce';
+import { PeriodComparison } from './components/PeriodComparison';
+import { DeliveryMetrics } from './components/DeliveryMetrics';
 import { DashboardControls } from './components/DashboardControls';
-import { Users, GripVertical } from 'lucide-react';
 import { DraggableColumnItem } from './components/DraggableColumnItem';
+import { useDebounce } from './hooks/useDebounce';
+import ExportReport from './components/ExportReport';
+import { GripVertical } from 'lucide-react';
 
 function App() {
   const [filters, setFilters] = useState({
@@ -24,33 +27,13 @@ function App() {
     storeStatus: 'ativas'
   });
 
-  useEffect(() => {
-    console.log('🔄 App.jsx - Filtros mudaram:', filters);
-  }, [filters]);
+  const [showExportModal, setShowExportModal] = useState(false);
 
   const [dashboardConfig, setDashboardConfig] = useState(() => {
     const saved = localStorage.getItem('dashboard-config');
     if (saved) {
-      const parsed = JSON.parse(saved);
-      return {
-        visibleComponents: parsed.visibleComponents || {
-          revenueChart: true,
-          topProducts: true,
-          hourHeatmap: true,
-          storeComparison: true,
-          kpiCards: true,
-          customerAnalytics: true,
-          operationalMetrics: true,
-          productPerformance: true
-        },
-        layout: parsed.layout || 'single-column',
-        columnLayout: parsed.columnLayout || {
-          left: ['revenueChart', 'customerAnalytics', 'operationalMetrics'],
-          right: ['topProducts', 'hourHeatmap', 'storeComparison', 'productPerformance']
-        }
-      };
+      return JSON.parse(saved);
     }
-    // Configuração padrão
     return {
       visibleComponents: {
         revenueChart: true,
@@ -60,55 +43,52 @@ function App() {
         kpiCards: true,
         customerAnalytics: true,
         operationalMetrics: true,
-        productPerformance: true
+        productPerformance: true,
+        periodComparison: true ,
+        deliveryMetrics: true
       },
       layout: 'single-column',
       columnLayout: {
-        left: ['revenueChart', 'customerAnalytics', 'operationalMetrics'],
-        right: ['topProducts', 'hourHeatmap', 'storeComparison', 'productPerformance']
-      }
+        left: ['revenueChart', 'periodComparison', 'customerAnalytics', 'operationalMetrics'],
+        right: ['topProducts', 'hourHeatmap', 'storeComparison', 'productPerformance', 'deliveryMetrics']
+      },
+      minimizedComponents: {}
     };
   });
 
-  // ESTADO PARA MINIMIZAR COMPONENTES
-  const [minimizedComponents, setMinimizedComponents] = useState(() => {
-    const saved = localStorage.getItem('dashboard-config');
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      return parsed.minimizedComponents || {};
-    }
-    return {};
-  });
+  useEffect(() => {
+    console.log('📄 App.jsx - Filtros mudaram:', filters);
+  }, [filters]);
 
-  // FUNÇÃO PARA TOGGLE MINIMIZE
-  const toggleMinimize = (componentId) => {
-    setMinimizedComponents(prev => ({
-      ...prev,
-      [componentId]: !prev[componentId]
-    }));
-  };
   const debouncedFilters = useDebounce(filters, 200);
 
-  const [columnLayout, setColumnLayout] = useState({
-    left: ['revenueChart', 'customerAnalytics', 'operationalMetrics'],
-    right: ['topProducts', 'hourHeatmap', 'storeComparison', 'productPerformance']
-  });
+  const toggleMinimize = (componentId) => {
+    setDashboardConfig(prev => ({
+      ...prev,
+      minimizedComponents: {
+        ...prev.minimizedComponents,
+        [componentId]: !prev.minimizedComponents?.[componentId]
+      }
+    }));
+  };
 
   const moveComponent = (componentId, fromColumn, toColumn) => {
-    setColumnLayout(prev => {
-      const newLayout = { ...prev };
-      
-      // Remove da coluna origem
+    setDashboardConfig(prev => {
+      const newLayout = { ...prev.columnLayout };
       newLayout[fromColumn] = newLayout[fromColumn].filter(id => id !== componentId);
-      
-      // Adiciona na coluna destino
       if (!newLayout[toColumn].includes(componentId)) {
         newLayout[toColumn].push(componentId);
       }
-      
-      return newLayout;
+      return {
+        ...prev,
+        columnLayout: newLayout
+      };
     });
   };
+
+  useEffect(() => {
+    localStorage.setItem('dashboard-config', JSON.stringify(dashboardConfig));
+  }, [dashboardConfig]);
 
   const Column = ({ columnId, components, onDrop }) => {
     const handleDragOver = (e) => {
@@ -128,8 +108,16 @@ function App() {
         <RevenueChart 
           key="revenue-chart" 
           filters={debouncedFilters}
-          isMinimized={minimizedComponents.revenueChart}
+          isMinimized={dashboardConfig.minimizedComponents?.revenueChart}
           onMinimize={() => toggleMinimize('revenueChart')}
+        />
+      ),
+      periodComparison: (
+        <PeriodComparison 
+          key="period-comparison" 
+          filters={debouncedFilters}
+          isMinimized={dashboardConfig.minimizedComponents?.periodComparison}
+          onMinimize={() => toggleMinimize('periodComparison')}
         />
       ),
       topProducts: (
@@ -137,7 +125,7 @@ function App() {
           key="top-products" 
           filters={debouncedFilters} 
           limit={10}
-          isMinimized={minimizedComponents.topProducts}
+          isMinimized={dashboardConfig.minimizedComponents?.topProducts}
           onMinimize={() => toggleMinimize('topProducts')}
         />
       ),
@@ -145,7 +133,7 @@ function App() {
         <HourHeatmap 
           key="hour-heatmap" 
           filters={debouncedFilters}
-          isMinimized={minimizedComponents.hourHeatmap}
+          isMinimized={dashboardConfig.minimizedComponents?.hourHeatmap}
           onMinimize={() => toggleMinimize('hourHeatmap')}
         />
       ),
@@ -153,7 +141,7 @@ function App() {
         <StoreComparison 
           key="store-comparison" 
           filters={debouncedFilters}
-          isMinimized={minimizedComponents.storeComparison}
+          isMinimized={dashboardConfig.minimizedComponents?.storeComparison}
           onMinimize={() => toggleMinimize('storeComparison')}
         />
       ),
@@ -161,7 +149,7 @@ function App() {
         <CustomerAnalytics 
           key="customer-analytics" 
           filters={debouncedFilters}
-          isMinimized={minimizedComponents.customerAnalytics}
+          isMinimized={dashboardConfig.minimizedComponents?.customerAnalytics}
           onMinimize={() => toggleMinimize('customerAnalytics')}
         />
       ),
@@ -169,7 +157,7 @@ function App() {
         <OperationalMetrics 
           key="operational-metrics" 
           filters={debouncedFilters}
-          isMinimized={minimizedComponents.operationalMetrics}
+          isMinimized={dashboardConfig.minimizedComponents?.operationalMetrics}
           onMinimize={() => toggleMinimize('operationalMetrics')}
         />
       ),
@@ -177,10 +165,18 @@ function App() {
         <ProductPerformance 
           key="product-performance" 
           filters={debouncedFilters}
-          isMinimized={minimizedComponents.productPerformance}
+          isMinimized={dashboardConfig.minimizedComponents?.productPerformance}
           onMinimize={() => toggleMinimize('productPerformance')}
         />
       ),
+      deliveryMetrics: (
+        <DeliveryMetrics 
+          key="delivery-metrics" 
+          filters={debouncedFilters}
+          isMinimized={dashboardConfig.minimizedComponents?.deliveryMetrics}
+          onMinimize={() => toggleMinimize('deliveryMetrics')}
+        />
+      )
     };
 
     const hasComponents = components.some(id => dashboardConfig.visibleComponents[id]);
@@ -204,7 +200,6 @@ function App() {
           )
         )}
         
-        {/* Área vazia para drop - só mostra quando não tem componentes */}
         {!hasComponents && (
           <div className="text-center text-gray-400 py-16 transition-colors hover:border-gray-400">
             <GripVertical size={48} className="mx-auto mb-4 opacity-50" />
@@ -216,15 +211,6 @@ function App() {
     );
   };
 
-  useEffect(() => {
-    const configToSave = {
-      ...dashboardConfig,
-      columnLayout,
-      minimizedComponents
-    };
-    localStorage.setItem('dashboard-config', JSON.stringify(configToSave));
-  }, [dashboardConfig, columnLayout, minimizedComponents]);
-
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
@@ -235,11 +221,14 @@ function App() {
               <h1 className="text-2xl font-bold text-gray-900">Analytics Dashboard</h1>
               <p className="text-sm text-gray-500">Restaurantes Challenge Brand</p>
             </div>
-            
+
             <div className="flex items-center gap-4">
               <DashboardControls 
-                config={dashboardConfig} 
-                onConfigChange={setDashboardConfig} 
+                config={dashboardConfig}
+                onConfigChange={(newConfig) => {
+                  setDashboardConfig(newConfig);
+                }}
+                onExport={() => setShowExportModal(true)}
               />
               <div className="text-sm text-gray-500 hidden md:block">
                 💡 Dica: Arraste os componentes usando ⋮⋮ para reorganizar
@@ -261,55 +250,95 @@ function App() {
           </div>
         )}
 
-        {/* Componentes com Layout Condicional */}
-          {dashboardConfig.layout === 'two-columns' ? (
-            // LAYOUT DE 2 COLUNAS USANDO MAIS ESPAÇO
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-8 min-h-screen">
-              {/* Coluna Esquerda */}
-              <div className="space-y-6">
-                <Column 
-                  columnId="left"
-                  components={columnLayout.left}
-                  onDrop={moveComponent}
-                />
-              </div>
-              
-              {/* Coluna Direita */}
-              <div className="space-y-6">
-                <Column 
-                  columnId="right"
-                  components={columnLayout.right}
-                  onDrop={moveComponent}
-                />
-              </div>
+        {dashboardConfig.layout === 'two-columns' ? (
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-8 min-h-screen">
+            <div className="space-y-6">
+              <Column 
+                columnId="left"
+                components={dashboardConfig.columnLayout.left}
+                onDrop={moveComponent}
+              />
             </div>
-          ) : (
-            // Layout de 1 coluna (original)
-            <DraggableDashboard>
-              {dashboardConfig.visibleComponents.revenueChart && (
-                <RevenueChart key="revenue-chart" filters={debouncedFilters} />
-              )}
-              {dashboardConfig.visibleComponents.topProducts && (
-                <TopProducts key="top-products" filters={debouncedFilters} limit={10} />
-              )}
-              {dashboardConfig.visibleComponents.hourHeatmap && (
-                <HourHeatmap key="hour-heatmap" filters={debouncedFilters} />
-              )}
-              {dashboardConfig.visibleComponents.storeComparison && (
-                <StoreComparison key="store-comparison" filters={debouncedFilters} />
-              )}
-              {dashboardConfig.visibleComponents.customerAnalytics && (
-                <CustomerAnalytics key="customer-analytics" filters={debouncedFilters} />
-              )}
-              {dashboardConfig.visibleComponents.operationalMetrics && (
-                <OperationalMetrics key="operational-metrics" filters={debouncedFilters} />
-              )}
-              {dashboardConfig.visibleComponents.productPerformance && (
-                <ProductPerformance key="product-performance" filters={debouncedFilters} />
-              )}
+            <div className="space-y-6">
+              <Column 
+                columnId="right"
+                components={dashboardConfig.columnLayout.right}
+                onDrop={moveComponent}
+              />
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-6">
+          <DraggableDashboard 
+            dashboardConfig={dashboardConfig}
+            onConfigChange={setDashboardConfig}
+          >
+            {dashboardConfig.visibleComponents.revenueChart && (
+              <RevenueChart 
+                key="revenue-chart" 
+                filters={debouncedFilters}
+              />
+            )}
+            {dashboardConfig.visibleComponents.topProducts && (
+              <TopProducts 
+                key="top-products" 
+                filters={debouncedFilters} 
+                limit={10}
+              />
+            )}
+            {dashboardConfig.visibleComponents.hourHeatmap && (
+              <HourHeatmap 
+                key="hour-heatmap" 
+                filters={debouncedFilters}
+              />
+            )}
+            {dashboardConfig.visibleComponents.storeComparison && (
+              <StoreComparison 
+                key="store-comparison" 
+                filters={debouncedFilters}
+              />
+            )}
+            {dashboardConfig.visibleComponents.customerAnalytics && (
+              <CustomerAnalytics 
+                key="customer-analytics" 
+                filters={debouncedFilters}
+              />
+            )}
+            {dashboardConfig.visibleComponents.operationalMetrics && (
+              <OperationalMetrics 
+                key="operational-metrics" 
+                filters={debouncedFilters}
+              />
+            )}
+            {dashboardConfig.visibleComponents.productPerformance && (
+              <ProductPerformance 
+                key="product-performance" 
+                filters={debouncedFilters}
+              />
+            )}
+            {dashboardConfig.visibleComponents.periodComparison && (
+              <PeriodComparison 
+                filters={debouncedFilters}
+                key="period-comparison"
+              />
+            )}
+            {dashboardConfig.visibleComponents.deliveryMetrics && (
+              <DeliveryMetrics 
+                filters={debouncedFilters}
+                key="delivery-metrics"
+              />
+            )}
             </DraggableDashboard>
-          )}
+          </div>
+        )}
       </div>
+
+      {showExportModal && (
+        <ExportReport 
+          filters={filters} 
+          onClose={() => setShowExportModal(false)} 
+        />
+      )}
     </div>
   );
 }

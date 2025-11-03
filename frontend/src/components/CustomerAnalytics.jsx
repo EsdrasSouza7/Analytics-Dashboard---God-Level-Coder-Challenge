@@ -1,6 +1,6 @@
 
 import { useState } from 'react';
-import { Users, TrendingUp, Star, RefreshCw, Clock, DollarSign, ShoppingBag, GripVertical, ChevronUp, ChevronDown, AlertTriangle } from 'lucide-react';
+import { Users, TrendingUp, Star, RefreshCw, Clock, DollarSign, ShoppingBag, GripVertical, ChevronUp, ChevronDown, AlertTriangle,  CreditCard, Wallet, Globe  } from 'lucide-react';
 import { useFetchWithCache } from '../hooks/useFetchWithCache';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 
@@ -24,12 +24,17 @@ export function CustomerAnalytics({ filters, onMinimize, isMinimized = false, dr
     [filters, retryCount]
   );
 
+  const { data: paymentMethods, loading: paymentLoading, error: paymentError } = useFetchWithCache(
+    `http://localhost:3001/api/payment-methods?${new URLSearchParams(filters)}`,
+    [filters, retryCount]
+  );
+
   const handleRetry = () => {
     setRetryCount(prev => prev + 1);
   };
 
   // Verificar se há erro em qualquer uma das requisições
-  const hasError = metricsError || customersError || segmentationError;
+  const hasError = metricsError || customersError || segmentationError || paymentError;
 
   if (hasError) {
     return (
@@ -87,7 +92,7 @@ export function CustomerAnalytics({ filters, onMinimize, isMinimized = false, dr
     { name: 'Inativos (>90d)', value: metrics.inativos_90d, color: '#EF4444' }
   ] : [];
 
-  const loading = metricsLoading || customersLoading || segmentationLoading;
+  const loading = metricsLoading || customersLoading || segmentationLoading || paymentLoading;
 
   return (
     <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
@@ -138,6 +143,14 @@ export function CustomerAnalytics({ filters, onMinimize, isMinimized = false, dr
                   }`}
                 >
                   Top Clientes
+                </button>
+                <button
+                  onClick={() => setActiveTab('pay')}
+                  className={`px-3 py-1.5 text-sm border-l transition-colors ${
+                    activeTab === 'pay' ? 'bg-purple-100 text-purple-600' : 'bg-white text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  Metodos de Pagamento
                 </button>
               </div>
             )}
@@ -494,6 +507,182 @@ export function CustomerAnalytics({ filters, onMinimize, isMinimized = false, dr
                         ))}
                       </tbody>
                     </table>
+                  </div>
+                </div>
+              )}
+              {/* NOVA SEÇÃO: Métodos de Pagamento */}
+              {activeTab === 'pay' &&  paymentMethods && paymentMethods.length > 0 && (
+                <div className="mt-6 pt-6 border-t">
+                  <h4 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                    <CreditCard size={18} className="text-blue-600" />
+                    Métodos de Pagamento Preferidos pelos Clientes
+                  </h4>
+                  
+                  {/* Cards de Pagamento */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {paymentMethods.slice(0, 6).map((payment, index) => {
+                      const total = paymentMethods.reduce((sum, p) => sum + p.transacoes, 0);
+                      const percentage = ((payment.transacoes / total) * 100).toFixed(1);
+                      
+                      return (
+                        <div key={index} className="border rounded-lg p-4 hover:shadow-md transition-shadow bg-white">
+                          <div className="flex items-center justify-between mb-3">
+                            <div className="flex items-center gap-2">
+                              {payment.online ? (
+                                <div className="p-2 bg-blue-100 rounded-lg">
+                                  <Globe size={18} className="text-blue-600" />
+                                </div>
+                              ) : (
+                                <div className="p-2 bg-green-100 rounded-lg">
+                                  <Wallet size={18} className="text-green-600" />
+                                </div>
+                              )}
+                              <span className="font-semibold text-gray-900 text-sm">
+                                {payment.metodo}
+                              </span>
+                            </div>
+                            <span className={`text-xs px-2 py-1 rounded-full font-medium ${
+                              payment.online 
+                                ? 'bg-blue-100 text-blue-700' 
+                                : 'bg-green-100 text-green-700'
+                            }`}>
+                              {payment.online ? 'Online' : 'Presencial'}
+                            </span>
+                          </div>
+                          
+                          <div className="space-y-2">
+                            <div className="flex justify-between text-sm">
+                              <span className="text-gray-600">Transações</span>
+                              <span className="font-semibold text-gray-900">
+                                {formatNumber(payment.transacoes)}
+                              </span>
+                            </div>
+                            
+                            <div className="flex justify-between text-sm">
+                              <span className="text-gray-600">Valor Total</span>
+                              <span className="font-semibold text-gray-900">
+                                {formatCurrency(payment.valor)}
+                              </span>
+                            </div>
+                            
+                            <div className="flex justify-between text-sm">
+                              <span className="text-gray-600">Ticket Médio</span>
+                              <span className="font-semibold text-gray-900">
+                                {formatCurrency(payment.valor / payment.transacoes)}
+                              </span>
+                            </div>
+                            
+                            {/* Barra de Porcentagem */}
+                            <div className="mt-3 pt-3 border-t">
+                              <div className="flex justify-between text-xs text-gray-500 mb-1">
+                                <span>% do Total de Transações</span>
+                                <span className="font-semibold text-gray-700">{percentage}%</span>
+                              </div>
+                              <div className="w-full bg-gray-200 rounded-full h-2">
+                                <div 
+                                  className={`h-2 rounded-full transition-all ${
+                                    payment.online ? 'bg-blue-600' : 'bg-green-600'
+                                  }`}
+                                  style={{ width: `${percentage}%` }}
+                                ></div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Resumo Online vs Presencial */}
+                  <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {(() => {
+                      const onlinePayments = paymentMethods.filter(p => p.online);
+                      const presencialPayments = paymentMethods.filter(p => !p.online);
+                      
+                      const onlineTotal = onlinePayments.reduce((sum, p) => sum + p.valor, 0);
+                      const presencialTotal = presencialPayments.reduce((sum, p) => sum + p.valor, 0);
+                      const totalValue = onlineTotal + presencialTotal;
+                      
+                      const onlineTransactions = onlinePayments.reduce((sum, p) => sum + p.transacoes, 0);
+                      const presencialTransactions = presencialPayments.reduce((sum, p) => sum + p.transacoes, 0);
+                      
+                      return (
+                        <>
+                          <div className="bg-gradient-to-br from-blue-50 to-blue-100 border border-blue-200 rounded-lg p-5">
+                            <div className="flex items-center gap-3 mb-3">
+                              <div className="p-2 bg-white rounded-lg shadow-sm">
+                                <Globe size={24} className="text-blue-600" />
+                              </div>
+                              <div>
+                                <span className="font-semibold text-blue-900 text-sm">Pagamentos Online</span>
+                                <div className="text-xs text-blue-700">{onlineTransactions} transações</div>
+                              </div>
+                            </div>
+                            <div className="text-3xl font-bold text-blue-600 mb-2">
+                              {formatCurrency(onlineTotal)}
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <div className="text-sm text-blue-700">
+                                {((onlineTotal / totalValue) * 100).toFixed(1)}% do total
+                              </div>
+                              <div className="text-sm text-blue-700">
+                                Ticket: {formatCurrency(onlineTotal / onlineTransactions)}
+                              </div>
+                            </div>
+                          </div>
+                          
+                          <div className="bg-gradient-to-br from-green-50 to-green-100 border border-green-200 rounded-lg p-5">
+                            <div className="flex items-center gap-3 mb-3">
+                              <div className="p-2 bg-white rounded-lg shadow-sm">
+                                <Wallet size={24} className="text-green-600" />
+                              </div>
+                              <div>
+                                <span className="font-semibold text-green-900 text-sm">Pagamentos Presenciais</span>
+                                <div className="text-xs text-green-700">{presencialTransactions} transações</div>
+                              </div>
+                            </div>
+                            <div className="text-3xl font-bold text-green-600 mb-2">
+                              {formatCurrency(presencialTotal)}
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <div className="text-sm text-green-700">
+                                {((presencialTotal / totalValue) * 100).toFixed(1)}% do total
+                              </div>
+                              <div className="text-sm text-green-700">
+                                Ticket: {formatCurrency(presencialTotal / presencialTransactions)}
+                              </div>
+                            </div>
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </div>
+
+                  {/* Insight Card */}
+                  <div className="mt-4 bg-purple-50 border border-purple-200 rounded-lg p-4">
+                    <div className="flex items-start gap-3">
+                      <div className="p-2 bg-purple-100 rounded-lg">
+                        <TrendingUp size={18} className="text-purple-600" />
+                      </div>
+                      <div>
+                        <h5 className="font-semibold text-purple-900 mb-1">💡 Insight</h5>
+                        <p className="text-sm text-purple-700">
+                          {(() => {
+                            const onlineTotal = paymentMethods.filter(p => p.online).reduce((s, p) => s + p.valor, 0);
+                            const totalValue = paymentMethods.reduce((s, p) => s + p.valor, 0);
+                            const onlinePercentage = ((onlineTotal / totalValue) * 100).toFixed(1);
+                            
+                            if (onlinePercentage > 70) {
+                              return `Seus clientes preferem fortemente pagamentos online (${onlinePercentage}%). Continue investindo em experiências digitais e considere oferecer benefícios exclusivos para pagamentos online.`;
+                            } else if (onlinePercentage > 40) {
+                              return `Há um equilíbrio entre pagamentos online (${onlinePercentage}%) e presenciais. Mantenha ambas as opções bem estruturadas para atender diferentes perfis de clientes.`;
+                            } else {
+                              return `Pagamentos presenciais dominam (${(100 - onlinePercentage).toFixed(1)}%). Considere incentivar pagamentos online com cashback ou descontos para reduzir custos operacionais.`;
+                            }
+                          })()}
+                        </p>
+                      </div>
+                    </div>
                   </div>
                 </div>
               )}

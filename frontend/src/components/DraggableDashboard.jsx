@@ -1,30 +1,35 @@
 import { useState, useEffect, cloneElement } from 'react';
 
-export function DraggableDashboard({ children }) {
-  // Converter children para array
-  const childrenArray = Array.isArray(children) ? children : [children];
-  
-  const [items, setItems] = useState(
-    childrenArray.map((child, index) => ({
+export function DraggableDashboard({ children, dashboardConfig, onConfigChange }) {
+  // Converter children para array e filtrar apenas os visíveis
+  const visibleChildren = Array.isArray(children) 
+    ? children.filter(child => child) 
+    : children ? [children] : [];
+
+  const [items, setItems] = useState(() => 
+    visibleChildren.map((child, index) => ({
       id: child.key || `item-${index}`,
-      isMinimized: false
+      isMinimized: dashboardConfig?.minimizedComponents?.[child.key] || false
     }))
   );
+  
   const [draggedItem, setDraggedItem] = useState(null);
 
-  // Atualizar quando children mudar (sem resetar a ordem)
+  // Atualizar items quando children mudar (componentes adicionados/removidos)
   useEffect(() => {
-    setItems(prevItems => {
-      // Manter a ordem e estado de minimizado, apenas atualizar os componentes
-      return prevItems.map(item => {
-        const newChild = childrenArray.find(child => (child.key || `item-${childrenArray.indexOf(child)}`) === item.id);
-        return {
-          ...item,
-          // Mantém isMinimized do estado anterior
-        };
-      });
+    const newItems = visibleChildren.map((child) => {
+      const existingItem = items.find(item => item.id === child.key);
+      return {
+        id: child.key || `item-${visibleChildren.indexOf(child)}`,
+        isMinimized: existingItem?.isMinimized || dashboardConfig?.minimizedComponents?.[child.key] || false
+      };
     });
-  }, [children]);
+    
+    // Só atualiza se houver mudança real
+    if (JSON.stringify(newItems.map(i => i.id)) !== JSON.stringify(items.map(i => i.id))) {
+      setItems(newItems);
+    }
+  }, [children, dashboardConfig?.minimizedComponents]);
 
   const handleDragStart = (e, index) => {
     setDraggedItem(index);
@@ -57,19 +62,31 @@ export function DraggableDashboard({ children }) {
   };
 
   const toggleMinimize = (index) => {
+    const itemId = items[index].id;
+    
     setItems(prevItems => 
       prevItems.map((item, i) => 
         i === index ? { ...item, isMinimized: !item.isMinimized } : item
       )
     );
+
+    // Atualizar no dashboardConfig
+    if (onConfigChange && dashboardConfig) {
+      onConfigChange({
+        ...dashboardConfig,
+        minimizedComponents: {
+          ...dashboardConfig.minimizedComponents,
+          [itemId]: !items[index].isMinimized
+        }
+      });
+    }
   };
 
   return (
     <div className="space-y-6">
       {items.map((item, index) => {
-        // Encontrar o componente child correspondente
-        const childComponent = childrenArray.find(
-          child => (child.key || `item-${childrenArray.indexOf(child)}`) === item.id
+        const childComponent = visibleChildren.find(
+          child => child.key === item.id
         );
 
         if (!childComponent) return null;
@@ -84,7 +101,6 @@ export function DraggableDashboard({ children }) {
             onDrop={(e) => handleDrop(e, index)}
             className="transition-all duration-200"
           >
-            {/* Clonar o componente e injetar as props necessárias */}
             {cloneElement(childComponent, {
               isMinimized: item.isMinimized,
               onMinimize: () => toggleMinimize(index),

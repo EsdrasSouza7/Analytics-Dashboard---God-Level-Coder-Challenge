@@ -28,6 +28,7 @@ function setCache(key, data) {
 function buildWhereClause(filters) {
   const conditions = ['s.sale_status_desc NOT IN (\'CANCELADO\', \'CANCELLED\')'];
   const values = [];
+  const joins = []; // Array para armazenar JOINs necessários
   let paramCount = 1;
 
   // Filtro de data customizada
@@ -35,30 +36,47 @@ function buildWhereClause(filters) {
     conditions.push(`s.created_at BETWEEN $${paramCount} AND $${paramCount + 1}`);
     values.push(filters.startDate, filters.endDate);
     paramCount += 2;
-  }else if (filters.period) {
+  } else if (filters.period) {
     const days = parseInt(filters.period.replace('d', ''));
     conditions.push(`s.created_at >= NOW() - INTERVAL '${days} days'`);
   }
 
-  // Filtro de canal
+  // Filtro de canal - adiciona JOIN se necessário
   if (filters.channel && filters.channel !== 'todos') {
+    if (!joins.includes('channels')) {
+      joins.push('channels');
+    }
     conditions.push(`c.name = $${paramCount}`);
     values.push(filters.channel);
     paramCount++;
   }
 
-  // Filtro de tipo de canal (Presencial vs Delivery)
+  // Filtro de tipo de canal - adiciona JOIN se necessário
   if (filters.channelType && filters.channelType !== 'todos') {
+    if (!joins.includes('channels')) {
+      joins.push('channels');
+    }
     conditions.push(`c.type = $${paramCount}`);
     values.push(filters.channelType);
     paramCount++;
   }
 
-  // Filtro de loja
+  // Filtro de loja - adiciona JOIN se necessário
   if (filters.store && filters.store !== 'todas') {
+    if (!joins.includes('stores')) {
+      joins.push('stores');
+    }
     conditions.push(`st.id = $${paramCount}`);
     values.push(parseInt(filters.store));
     paramCount++;
+  }
+
+  // Filtro de status da loja
+  if (filters.storeStatus === 'ativas') {
+    if (!joins.includes('stores')) {
+      joins.push('stores');
+    }
+    conditions.push(`st.is_active = true`);
   }
 
   // Filtro de sub-brand
@@ -69,8 +87,28 @@ function buildWhereClause(filters) {
   }
 
   const whereClause = 'WHERE ' + conditions.join(' AND ');
+  
   console.log('📤 WHERE gerado:', whereClause);
-  return { whereClause, values };
+  console.log('🔗 JOINs necessários:', joins);
+  
+  return { whereClause, values, joins };
+}
+
+// Helper para gerar os JOINs dinamicamente
+function buildJoinClause(joins) {
+  let joinClause = '';
+  
+  if (joins.includes('channels')) {
+    joinClause += `
+      LEFT JOIN channels c ON s.channel_id = c.id`;
+  }
+  
+  if (joins.includes('stores')) {
+    joinClause += `
+      LEFT JOIN stores st ON s.store_id = st.id`;
+  }
+  
+  return joinClause;
 }
 
 // 🏢 Endpoint: Listar opções de filtros (lojas, canais, sub-brands)
@@ -97,6 +135,11 @@ router.get('/filter-options', async (req, res) => {
   } catch (error) {
     console.error('Erro em /filter-options:', error);
     res.status(500).json({ error: 'Erro ao buscar opções de filtro' });
+  }
+  finally {
+    if (client) {
+      client.release();
+    }
   }
 });
 
@@ -232,6 +275,11 @@ router.get('/metrics', async (req, res) => {
   } catch (error) {
     console.error('Erro em /metrics:', error);
     res.status(500).json({ error: 'Erro ao buscar métricas' });
+  }
+  finally {
+    if (client) {
+      client.release();
+    }
   }
 });
 
@@ -595,18 +643,20 @@ router.get('/coupon-performance', async (req, res) => {
 // 📊 Endpoint: Métricas de Clientes
 router.get('/customer-metrics', async (req, res) => {
   try {
-    const { whereClause, values } = buildWhereClause(req.query);
+    const { whereClause, values, joins } = buildWhereClause(req.query);
+    const joinClause = buildJoinClause(joins);
 
     const query = `
       WITH customer_last_purchase AS (
         SELECT 
-          c.id,
+          cus.id,
           MAX(s.created_at) as ultima_compra
-        FROM customers c
-        LEFT JOIN sales s ON c.id = s.customer_id 
+        FROM customers cus
+        LEFT JOIN sales s ON cus.id = s.customer_id 
           AND s.sale_status_desc NOT IN ('CANCELADO', 'CANCELLED')
+        ${joinClause}
         ${whereClause}
-        GROUP BY c.id
+        GROUP BY cus.id
       )
       SELECT 
         COUNT(DISTINCT clp.id) as total_clientes,
@@ -653,18 +703,19 @@ router.get('/customer-metrics', async (req, res) => {
         -- Métricas gerais
         AVG(s.total_amount) as ticket_medio_geral,
         CASE 
-          WHEN COUNT(DISTINCT c.id) > 0 
-          THEN COUNT(DISTINCT s.id)::decimal / COUNT(DISTINCT c.id)
+          WHEN COUNT(DISTINCT cus.id) > 0 
+          THEN COUNT(DISTINCT s.id)::decimal / COUNT(DISTINCT cus.id)
           ELSE 0 
         END as frequencia_media
 
       FROM customer_last_purchase clp
-      LEFT JOIN customers c ON clp.id = c.id
-      LEFT JOIN sales s ON c.id = s.customer_id 
+      LEFT JOIN customers cus ON clp.id = cus.id
+      LEFT JOIN sales s ON cus.id = s.customer_id 
         AND s.sale_status_desc NOT IN ('CANCELADO', 'CANCELLED')
     `;
 
-    console.log('✅ Query com períodos exclusivos');
+    console.log('✅ Query final:', query);
+    console.log('📊 Valores:', values);
     
     const result = await pool.query(query, values);
     
@@ -682,31 +733,31 @@ router.get('/customer-metrics', async (req, res) => {
 // 🏆 Endpoint: Top Clientes
 router.get('/top-customers', async (req, res) => {
   try {
-    const { whereClause, values } = buildWhereClause(req.query);
-    const limit = req.query.limit || 10;
+    const { whereClause, values, joins } = buildWhereClause(req.query);
+    const joinClause = buildJoinClause(joins);
+    const limit = parseInt(req.query.limit) || 10;
 
+    // Query sem usar parâmetro para LIMIT
     const query = `
       SELECT 
-        c.id,
-        c.customer_name,
-        c.email,
-        c.phone_number,
+        cus.id,
+        cus.customer_name,
+        cus.email,
+        cus.phone_number,
         COUNT(DISTINCT s.id) as total_pedidos,
         SUM(s.total_amount) as total_gasto,
         AVG(s.total_amount) as ticket_medio,
         MAX(s.created_at) as ultima_compra,
-        COUNT(DISTINCT st.id) as lojas_frequentadas
-      FROM customers c
-      JOIN sales s ON c.id = s.customer_id
-      JOIN channels ch ON s.channel_id = ch.id
-      JOIN stores st ON s.store_id = st.id
+        COUNT(DISTINCT s.store_id) as lojas_frequentadas
+      FROM customers cus
+      JOIN sales s ON cus.id = s.customer_id${joinClause}
       ${whereClause}
-      GROUP BY c.id, c.customer_name, c.email, c.phone_number
+      GROUP BY cus.id, cus.customer_name, cus.email, cus.phone_number
       ORDER BY total_gasto DESC
-      LIMIT $${values.length + 1}
+      LIMIT ${limit}
     `;
 
-    const result = await pool.query(query, [...values, limit]);
+    const result = await pool.query(query, values);
     
     const data = result.rows.map(row => ({
       id: row.id,
@@ -723,21 +774,26 @@ router.get('/top-customers', async (req, res) => {
 
     res.json(data);
   } catch (error) {
-    console.error('Erro em /top-customers:', error);
-    res.status(500).json({ error: 'Erro ao buscar top clientes' });
+    console.error('❌ Erro em /top-customers:', error);
+    console.error('Query completa:', error.message);
+    res.status(500).json({ 
+      error: 'Erro ao buscar top clientes',
+      details: error.message
+    });
   }
 });
 
 // 📈 Endpoint: Segmentação por Frequência
 router.get('/customer-segmentation', async (req, res) => {
   try {
-    const { whereClause, values } = buildWhereClause(req.query);
+    const { whereClause, values, joins } = buildWhereClause(req.query);
+    const joinClause = buildJoinClause(joins);
 
     const query = `
       WITH customer_stats AS (
         SELECT 
-          c.id,
-          c.customer_name,
+          cus.id,
+          cus.customer_name,
           COUNT(DISTINCT s.id) as total_pedidos,
           SUM(s.total_amount) as total_gasto,
           MAX(s.created_at) as ultima_compra,
@@ -748,17 +804,15 @@ router.get('/customer-segmentation', async (req, res) => {
             ELSE 'Novo'
           END as segmento,
           CASE 
-            When MAX(s.created_at) >= NOW() - INTERVAL '7 days' THEN 'Muito Ativo'
+            WHEN MAX(s.created_at) >= NOW() - INTERVAL '7 days' THEN 'Muito Ativo'
             WHEN MAX(s.created_at) >= NOW() - INTERVAL '15 days' THEN 'Ativo'
             WHEN MAX(s.created_at) >= NOW() - INTERVAL '30 days' THEN 'Inativo Recente'
             ELSE 'Inativo'
           END as status_ativo
-        FROM customers c
-        LEFT JOIN sales s ON c.id = s.customer_id
-        JOIN channels ch ON s.channel_id = ch.id
-        JOIN stores st ON s.store_id = st.id
+        FROM customers cus
+        LEFT JOIN sales s ON cus.id = s.customer_id${joinClause}
         ${whereClause}
-        GROUP BY c.id, c.customer_name
+        GROUP BY cus.id, cus.customer_name
       )
       SELECT 
         segmento,
@@ -771,11 +825,16 @@ router.get('/customer-segmentation', async (req, res) => {
       ORDER BY segmento, status_ativo
     `;
 
+    console.log('✅ Segmentation Query executada');
+
     const result = await pool.query(query, values);
     res.json(result.rows);
   } catch (error) {
-    console.error('Erro em /customer-segmentation:', error);
-    res.status(500).json({ error: 'Erro ao buscar segmentação' });
+    console.error('❌ Erro em /customer-segmentation:', error);
+    res.status(500).json({ 
+      error: 'Erro ao buscar segmentação',
+      details: error.message
+    });
   }
 });
 
@@ -838,6 +897,48 @@ function buildWhereClauseIncludingCancelled(queryParams) {
 
   return { whereClause, values };
 }
+
+// 💳 Métodos de pagamento (para CustomerAnalytics)
+router.get('/payment-methods', async (req, res) => {
+  try {
+    const cacheKey = getCacheKey('payment-methods', req.query);
+    const cached = getFromCache(cacheKey);
+    if (cached) return res.json(cached);
+
+    const { whereClause, values } = buildWhereClause(req.query);
+
+    const query = `
+      SELECT 
+        pt.description as metodo,
+        p.is_online,
+        COUNT(DISTINCT p.sale_id) as transacoes,
+        SUM(p.value) as valor_total
+      FROM payments p
+      JOIN payment_types pt ON p.payment_type_id = pt.id
+      JOIN sales s ON p.sale_id = s.id
+      JOIN channels c ON s.channel_id = c.id
+      JOIN stores st ON s.store_id = st.id
+      ${whereClause}
+      GROUP BY pt.description, p.is_online
+      ORDER BY valor_total DESC
+    `;
+
+    const result = await pool.query(query, values);
+    
+    const data = result.rows.map(row => ({
+      metodo: row.metodo,
+      online: row.is_online,
+      transacoes: parseInt(row.transacoes),
+      valor: parseFloat(row.valor_total)
+    }));
+
+    setCache(cacheKey, data);
+    res.json(data);
+  } catch (error) {
+    console.error('Erro em /payment-methods:', error);
+    res.status(500).json({ error: 'Erro ao buscar métodos de pagamento' });
+  }
+});
 
 // 📊 Métricas Operacionais Gerais
 router.get('/operational-metrics', async (req, res) => {
@@ -1300,6 +1401,533 @@ router.get('/category-performance', async (req, res) => {
   } catch (error) {
     console.error('Erro em /category-performance:', error);
     res.status(500).json({ error: 'Erro ao buscar performance por categoria' });
+  }
+});
+
+// Comparação de Períodos
+// 📊 Endpoint: Period Comparison
+router.get('/period-comparison', async (req, res) => {
+  try {
+    const { whereClause, values, joins } = buildWhereClause(req.query);
+    const joinClause = buildJoinClause(joins);
+
+    // Calcular período anterior baseado no filtro
+    const period = req.query.period || '30d';
+    const days = parseInt(period.replace('d', ''));
+
+    // 1. COMPARAÇÃO PERÍODO ATUAL vs ANTERIOR
+    const comparisonQuery = `
+      WITH current_period AS (
+        SELECT 
+          COUNT(DISTINCT s.id) as orders,
+          SUM(s.total_amount) as revenue,
+          AVG(s.total_amount) as avg_ticket
+        FROM sales s
+        ${joinClause}
+        ${whereClause}
+      ),
+      previous_period AS (
+        SELECT 
+          COUNT(DISTINCT s.id) as orders,
+          SUM(s.total_amount) as revenue,
+          AVG(s.total_amount) as avg_ticket
+        FROM sales s
+        ${joinClause}
+        WHERE s.sale_status_desc NOT IN ('CANCELADO', 'CANCELLED')
+          AND s.created_at >= NOW() - INTERVAL '${days * 2} days'
+          AND s.created_at < NOW() - INTERVAL '${days} days'
+      )
+      SELECT 
+        current_period.*,
+        previous_period.orders as prev_orders,
+        previous_period.revenue as prev_revenue,
+        previous_period.avg_ticket as prev_avg_ticket
+      FROM current_period, previous_period
+    `;
+
+    const comparisonResult = await pool.query(comparisonQuery, values);
+    const comp = comparisonResult.rows[0];
+
+    const comparison = {
+      revenue: {
+        current: parseFloat(comp.revenue || 0),
+        previous: parseFloat(comp.prev_revenue || 0),
+        percentChange: comp.prev_revenue > 0 
+          ? ((comp.revenue - comp.prev_revenue) / comp.prev_revenue * 100) 
+          : 0
+      },
+      orders: {
+        current: parseInt(comp.orders || 0),
+        previous: parseInt(comp.prev_orders || 0),
+        percentChange: comp.prev_orders > 0 
+          ? ((comp.orders - comp.prev_orders) / comp.prev_orders * 100) 
+          : 0
+      },
+      avgTicket: {
+        current: parseFloat(comp.avg_ticket || 0),
+        previous: parseFloat(comp.prev_avg_ticket || 0),
+        percentChange: comp.prev_avg_ticket > 0 
+          ? ((comp.avg_ticket - comp.prev_avg_ticket) / comp.prev_avg_ticket * 100) 
+          : 0
+      }
+    };
+
+    // 2. COMPARAÇÃO DIÁRIA (ATUAL vs ANTERIOR)
+    const dailyComparisonQuery = `
+      WITH current_daily AS (
+        SELECT 
+          DATE(s.created_at) as date,
+          ROW_NUMBER() OVER (ORDER BY DATE(s.created_at)) as day_num,
+          SUM(s.total_amount) as revenue
+        FROM sales s
+        ${joinClause}
+        ${whereClause}
+        GROUP BY DATE(s.created_at)
+      ),
+      previous_daily AS (
+        SELECT 
+          DATE(s.created_at) as date,
+          ROW_NUMBER() OVER (ORDER BY DATE(s.created_at)) as day_num,
+          SUM(s.total_amount) as revenue
+        FROM sales s
+        ${joinClause}
+        WHERE s.sale_status_desc NOT IN ('CANCELADO', 'CANCELLED')
+          AND s.created_at >= NOW() - INTERVAL '${days * 2} days'
+          AND s.created_at < NOW() - INTERVAL '${days} days'
+        GROUP BY DATE(s.created_at)
+      )
+      SELECT 
+        c.day_num,
+        c.revenue as current,
+        p.revenue as previous
+      FROM current_daily c
+      LEFT JOIN previous_daily p ON c.day_num = p.day_num
+      ORDER BY c.day_num
+    `;
+
+    const dailyResult = await pool.query(dailyComparisonQuery, values);
+    const dailyComparison = dailyResult.rows.map(row => ({
+      day: `Dia ${row.day_num}`,
+      current: parseFloat(row.current || 0),
+      previous: parseFloat(row.previous || 0)
+    }));
+
+    // 3. EVOLUÇÃO SEMANAL
+    const weeklyQuery = `
+      SELECT 
+        TO_CHAR(s.created_at, 'IYYY-IW') as week,
+        MIN(DATE(s.created_at)) as week_start,
+        SUM(s.total_amount) as revenue,
+        COUNT(DISTINCT s.id) as orders
+      FROM sales s
+      ${joinClause}
+      ${whereClause}
+      GROUP BY TO_CHAR(s.created_at, 'IYYY-IW')
+      ORDER BY week
+    `;
+
+    const weeklyResult = await pool.query(weeklyQuery, values);
+    const weeklyEvolution = weeklyResult.rows.map(row => ({
+      week: `Sem ${row.week.split('-')[1]}`,
+      revenue: parseFloat(row.revenue),
+      orders: parseInt(row.orders) * 100 // Multiplicar por 100 para visualizar melhor no gráfico
+    }));
+
+    // Estatísticas semanais
+    const revenues = weeklyEvolution.map(w => w.revenue);
+    const weeklyStats = {
+      best: {
+        week: weeklyEvolution.reduce((max, w) => w.revenue > max.revenue ? w : max, weeklyEvolution[0])?.week,
+        revenue: Math.max(...revenues),
+        orders: Math.max(...weeklyEvolution.map(w => w.orders / 100))
+      },
+      avgGrowth: revenues.length > 1 
+        ? ((revenues[revenues.length - 1] - revenues[0]) / revenues[0] * 100) / (revenues.length - 1)
+        : 0
+    };
+
+
+    // 4. METAS (Exemplo - você pode customizar)
+    const currentRevenue = parseFloat(comp.revenue || 0);
+    const targetRevenue = currentRevenue * 1.2; // Meta 20% acima do atual
+    
+    const goals = [
+      {
+        name: 'Meta de Receita Mensal',
+        current: currentRevenue,
+        target: targetRevenue,
+        achieved: (currentRevenue / targetRevenue * 100),
+        daysLeft: 30 - days
+      },
+      {
+        name: 'Meta de Pedidos',
+        current: parseInt(comp.orders || 0),
+        target: parseInt(comp.orders || 0) * 1.15,
+        achieved: (parseInt(comp.orders || 0) / (parseInt(comp.orders || 0) * 1.15) * 100),
+        daysLeft: 30 - days
+      },
+      {
+        name: 'Meta de Ticket Médio',
+        current: parseFloat(comp.avg_ticket || 0),
+        target: parseFloat(comp.avg_ticket || 0) * 1.1,
+        achieved: (parseFloat(comp.avg_ticket || 0) / (parseFloat(comp.avg_ticket || 0) * 1.1) * 100),
+        daysLeft: 30 - days
+      }
+    ];
+
+    // 5. TENDÊNCIAS E PROJEÇÕES
+    const trends = weeklyEvolution.map((week, idx) => {
+      // Linha de tendência simples (regressão linear simplificada)
+      const trendValue = revenues[0] + (idx * weeklyStats.avgGrowth * revenues[0] / 100);
+      return {
+        period: week.week,
+        actual: week.revenue,
+        trend: trendValue
+      };
+    });
+
+    // Projeção para próximo período
+    const lastRevenue = revenues[revenues.length - 1];
+    const growthRate = weeklyStats.avgGrowth;
+    const projection = lastRevenue * (1 + growthRate / 100);
+
+    // Insights automáticos
+    const insights = [];
+    
+    if (comparison.revenue.percentChange > 10) {
+      insights.push(`Crescimento excepcional de ${comparison.revenue.percentChange.toFixed(1)}% na receita comparado ao período anterior`);
+    } else if (comparison.revenue.percentChange < -10) {
+      insights.push(`Queda de ${Math.abs(comparison.revenue.percentChange).toFixed(1)}% na receita - requer atenção`);
+    }
+
+    if (comparison.orders.percentChange > comparison.revenue.percentChange) {
+      insights.push('Número de pedidos crescendo mais rápido que a receita - possível redução no ticket médio');
+    }
+
+    if (weeklyStats.avgGrowth > 5) {
+      insights.push(`Tendência de crescimento semanal consistente (${weeklyStats.avgGrowth.toFixed(1)}% em média)`);
+    } else if (weeklyStats.avgGrowth < -5) {
+      insights.push(`Tendência de queda semanal - considere ações de marketing e promoções`);
+    }
+
+    if (goals[0].achieved >= 100) {
+      insights.push('Meta de receita já atingida! Continue o ótimo trabalho');
+    } else if (goals[0].achieved < 50) {
+      insights.push(`Apenas ${goals[0].achieved.toFixed(0)}% da meta atingida - acelere as estratégias de vendas`);
+    }
+
+    const trendAnalysis = {
+      projection,
+      growthRate,
+      insights: insights.length > 0 ? insights : ['Desempenho estável no período analisado']
+    };
+
+    res.json({
+      comparison,
+      dailyComparison,
+      weeklyEvolution,
+      weeklyStats,
+      goals,
+      trends,
+      trendAnalysis
+    });
+
+  } catch (error) {
+    console.error('❌ Erro em /period-comparison:', error);
+    res.status(500).json({ 
+      error: 'Erro ao buscar comparação de períodos',
+      details: error.message
+    });
+  }
+});
+
+// Metricas de Delivery
+// 🚚 Endpoint: Delivery Overview - QUERY SEPARADA
+router.get('/delivery-overview', async (req, res) => {
+  let client;
+  try {
+    const { whereClause, values, joins } = buildWhereClause(req.query);
+    const joinClause = buildJoinClause(joins);
+
+    const baseFrom = `
+      FROM sales s
+      LEFT JOIN delivery_sales ds ON s.id = ds.sale_id
+      ${joinClause}
+      ${whereClause}
+        AND s.channel_id IN (SELECT id FROM channels WHERE type = 'D')
+    `;
+
+    // Query 1: Estatísticas principais
+    const statsQuery = `
+      SELECT 
+        COUNT(DISTINCT s.id) as total_deliveries,
+        AVG(s.delivery_seconds) as avg_delivery_time,
+        AVG(s.production_seconds) as avg_production_time,
+        AVG(ds.delivery_fee) as avg_delivery_fee,
+        AVG(ds.courier_fee) as avg_courier_fee,
+        SUM(ds.delivery_fee) as total_delivery_fees,
+        COUNT(DISTINCT CASE WHEN ds.status = 'DELIVERED' THEN s.id END) as delivered_count
+      ${baseFrom}
+    `;
+
+    // Query 2: Distribuição de status
+    const statusQuery = `
+      SELECT 
+        COALESCE(ds.status, 'UNKNOWN') as status,
+        COUNT(*) as count
+      ${baseFrom}
+      GROUP BY ds.status
+    `;
+
+    // Query 3: Tipos de delivery
+    const typesQuery = `
+      SELECT 
+        COALESCE(ds.delivery_type, 'Não especificado') as type,
+        COUNT(*) as count
+      ${baseFrom}
+      GROUP BY ds.delivery_type
+    `;
+
+    client = await pool.connect();
+    
+    // Executar queries em sequência (não paralelo para economizar memória)
+    const statsResult = await client.query(statsQuery, values);
+    const statusResult = await client.query(statusQuery, values);
+    const typesResult = await client.query(typesQuery, values);
+
+    const stats = statsResult.rows[0] || {};
+    const totalDeliveries = parseInt(stats.total_deliveries || 0);
+
+    const response = {
+      total_deliveries: totalDeliveries,
+      avg_delivery_time: parseFloat(stats.avg_delivery_time || 0),
+      avg_production_time: parseFloat(stats.avg_production_time || 0),
+      avg_delivery_fee: parseFloat(stats.avg_delivery_fee || 0),
+      avg_courier_fee: parseFloat(stats.avg_courier_fee || 0),
+      total_delivery_fees: parseFloat(stats.total_delivery_fees || 0),
+      delivered_count: parseInt(stats.delivered_count || 0),
+      delivery_rate: 1.0, // Como é só delivery, assume 100%
+      success_rate: totalDeliveries > 0 ? parseInt(stats.delivered_count || 0) / totalDeliveries : 0,
+      status_distribution: statusResult.rows,
+      delivery_types: typesResult.rows
+    };
+
+    res.json(response);
+
+  } catch (error) {
+    console.error('❌ Erro em /delivery-overview:', error);
+    res.status(500).json({ 
+      error: 'Erro ao buscar overview de delivery',
+      details: error.message
+    });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
+// 📍 Endpoint: Delivery by Regions - CORRIGIDO
+router.get('/delivery-regions', async (req, res) => {
+  let client;
+  try {
+    const { whereClause, values, joins } = buildWhereClause(req.query);
+    
+    // Verificar se stores já está nos joins para evitar duplicação
+    const hasStoresJoin = joins && joins.includes('stores');
+    const joinClause = buildJoinClause(joins);
+
+    const query = `
+      SELECT 
+        da.neighborhood,
+        da.city,
+        da.state,
+        COUNT(DISTINCT s.id) as total_deliveries,
+        AVG(s.delivery_seconds) as avg_delivery_time,
+        AVG(s.production_seconds) as avg_production_time,
+        AVG(ds.delivery_fee) as avg_delivery_fee,
+        AVG(ds.courier_fee) as avg_courier_fee,
+        -- Calcular distância aproximada (se tiver lat/long)
+        AVG(
+          CASE 
+            WHEN da.latitude IS NOT NULL AND da.longitude IS NOT NULL 
+                 AND st.latitude IS NOT NULL AND st.longitude IS NOT NULL
+            THEN SQRT(
+              POWER((da.latitude - st.latitude) * 111, 2) + 
+              POWER((da.longitude - st.longitude) * 111 * COS(RADIANS(da.latitude)), 2)
+            )
+            ELSE 0 
+          END
+        ) as avg_distance,
+        -- Score de eficiência (menor tempo = melhor)
+        CASE 
+          WHEN AVG(s.delivery_seconds) < 1800 THEN 95
+          WHEN AVG(s.delivery_seconds) < 2700 THEN 75
+          ELSE 50
+        END as efficiency_score
+      FROM sales s
+      LEFT JOIN delivery_sales ds ON s.id = ds.sale_id
+      LEFT JOIN delivery_addresses da ON s.id = da.sale_id
+      ${hasStoresJoin ? '' : 'LEFT JOIN stores st ON s.store_id = st.id'}
+      ${joinClause}
+      ${whereClause}
+        AND s.channel_id IN (SELECT id FROM channels WHERE type = 'D')
+      GROUP BY da.neighborhood, da.city, da.state
+      HAVING COUNT(DISTINCT s.id) >= 3
+      ORDER BY total_deliveries DESC
+      LIMIT 20
+    `;
+
+    client = await pool.connect();
+    const result = await client.query(query, values);
+    
+    const data = result.rows.map(row => ({
+      neighborhood: row.neighborhood,
+      city: row.city,
+      state: row.state,
+      total_deliveries: parseInt(row.total_deliveries),
+      avg_delivery_time: parseFloat(row.avg_delivery_time || 0),
+      avg_production_time: parseFloat(row.avg_production_time || 0),
+      avg_delivery_fee: parseFloat(row.avg_delivery_fee || 0),
+      avg_courier_fee: parseFloat(row.avg_courier_fee || 0),
+      avg_distance: parseFloat(row.avg_distance || 0),
+      efficiency_score: parseInt(row.efficiency_score)
+    }));
+
+    res.json(data);
+
+  } catch (error) {
+    console.error('❌ Erro em /delivery-regions:', error);
+    res.status(500).json({ 
+      error: 'Erro ao buscar delivery por região',
+      details: error.message
+    });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
+// 🏢 Endpoint: Delivery by Platforms
+router.get('/delivery-platforms', async (req, res) => {
+  try {
+    const { whereClause, values, joins } = buildWhereClause(req.query);
+    const joinClause = buildJoinClause(joins);
+
+    const query = `
+      WITH platform_stats AS (
+        SELECT 
+          COALESCE(ds.delivered_by, c.name, 'Plataforma Desconhecida') as platform_name,
+          COUNT(DISTINCT s.id) as total_orders,
+          SUM(s.total_amount) as total_revenue,
+          AVG(s.total_amount) as avg_ticket,
+          AVG(s.delivery_seconds) as avg_delivery_time,
+          AVG(s.production_seconds) as avg_production_time,
+          AVG(ds.delivery_fee) as avg_delivery_fee,
+          AVG(ds.courier_fee) as avg_courier_fee
+        FROM sales s
+        LEFT JOIN delivery_sales ds ON s.id = ds.sale_id
+        LEFT JOIN channels c ON s.channel_id = c.id
+        ${joinClause}
+        ${whereClause}
+          AND s.channel_id IN (SELECT c2.id FROM channels c2 WHERE c2.type = 'D')
+        GROUP BY platform_name
+      ),
+      total_revenue AS (
+        SELECT SUM(total_revenue) as total FROM platform_stats
+      )
+      SELECT 
+        ps.*,
+        CASE WHEN tr.total > 0 THEN ps.total_revenue / tr.total ELSE 0 END as market_share
+      FROM platform_stats ps
+      CROSS JOIN total_revenue tr
+      ORDER BY total_orders DESC
+    `;
+
+    const result = await pool.query(query, values);
+    
+    const data = result.rows.map(row => ({
+      platform_name: row.platform_name,
+      total_orders: parseInt(row.total_orders),
+      total_revenue: parseFloat(row.total_revenue || 0),
+      avg_ticket: parseFloat(row.avg_ticket || 0),
+      avg_delivery_time: parseFloat(row.avg_delivery_time || 0),
+      avg_production_time: parseFloat(row.avg_production_time || 0),
+      avg_delivery_fee: parseFloat(row.avg_delivery_fee || 0),
+      avg_courier_fee: parseFloat(row.avg_courier_fee || 0),
+      market_share: parseFloat(row.market_share || 0)
+    }));
+
+    res.json(data);
+
+  } catch (error) {
+    console.error('❌ Erro em /delivery-platforms:', error);
+    res.status(500).json({ 
+      error: 'Erro ao buscar delivery por plataforma',
+      details: error.message
+    });
+  }
+});
+
+// ⏱️ Endpoint: Delivery Timing Analysis
+router.get('/delivery-timing', async (req, res) => {
+  try {
+    const { whereClause, values, joins } = buildWhereClause(req.query);
+    const joinClause = buildJoinClause(joins);
+
+    // Timeline
+    const timelineQuery = `
+      SELECT 
+        DATE(s.created_at) as date,
+        AVG(s.delivery_seconds) as avg_delivery_time,
+        AVG(s.production_seconds) as avg_production_time,
+        COUNT(*) as deliveries
+      FROM sales s
+      ${joinClause}
+      ${whereClause}
+        AND s.channel_id IN (SELECT c.id FROM channels c WHERE c.type = 'D')
+      GROUP BY DATE(s.created_at)
+      ORDER BY date
+    `;
+
+    // Hourly
+    const hourlyQuery = `
+      SELECT 
+        EXTRACT(HOUR FROM s.created_at) as hour,
+        AVG(s.delivery_seconds) as avg_time,
+        COUNT(*) as deliveries
+      FROM sales s
+      ${joinClause}
+      ${whereClause}
+        AND s.channel_id IN (SELECT c.id FROM channels c WHERE c.type = 'D')
+      GROUP BY EXTRACT(HOUR FROM s.created_at)
+      ORDER BY hour
+    `;
+
+    const timelineResult = await pool.query(timelineQuery, values);
+    const hourlyResult = await pool.query(hourlyQuery, values);
+
+    res.json({
+      timeline: timelineResult.rows.map(row => ({
+        date: row.date,
+        avg_delivery_time: parseFloat(row.avg_delivery_time || 0),
+        avg_production_time: parseFloat(row.avg_production_time || 0),
+        deliveries: parseInt(row.deliveries)
+      })),
+      hourly: hourlyResult.rows.map(row => ({
+        hour: `${parseInt(row.hour)}h`,
+        avg_time: parseFloat(row.avg_time || 0),
+        deliveries: parseInt(row.deliveries)
+      }))
+    });
+
+  } catch (error) {
+    console.error('❌ Erro em /delivery-timing:', error);
+    res.status(500).json({ 
+      error: 'Erro ao buscar análise temporal de delivery',
+      details: error.message
+    });
   }
 });
 
