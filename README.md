@@ -1,4 +1,4 @@
-# 🚀 Analytics Dashboard - Restaurantes Challenge Brand
+# 🚀 Analytics Dashboard
 
 ![React](https://img.shields.io/badge/React-18.2.0-blue)
 ![Node.js](https://img.shields.io/badge/Node.js-18+-green)
@@ -7,6 +7,7 @@
 ![Tailwind](https://img.shields.io/badge/Tailwind-CSS-38B2AC)
 
 Um dashboard analítico completo para redes de restaurantes, oferecendo insights em tempo real sobre vendas, desempenho operacional, análise de clientes e métricas de delivery.
+Imagens do Projeto pode ser encontrados no meu portifolio: https://esdrassouza7.github.io/EsdrasSouza7
 
 ## ✨ Funcionalidades Principais
 
