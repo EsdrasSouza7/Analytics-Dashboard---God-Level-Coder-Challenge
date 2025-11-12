@@ -62,6 +62,7 @@ Um dashboard analítico completo para redes de restaurantes, oferecendo insights
 ```bash
 git clone https://github.com/seu-usuario/analytics-dashboard.git
 cd analytics-dashboard
+
 ```
 
 ### 2. Configuração do Backend
@@ -73,7 +74,16 @@ cd backend
 # Edite o arquivo .env com suas configurações
 
 # Execute o Docker Compose
-docker-compose up -d
+docker compose down -v 2>/dev/null || true
+docker compose build --no-cache data-generator
+docker compose up -d postgres
+
+# Execulte para gerar os dados
+docker compose run --rm data-generator
+docker compose --profile tools up -d pgadmin
+
+
+**Aguarde 5-15 minutos** enquanto 500k vendas são geradas.
 ```
 
 #### 💻 **Opção de Desenvolvimento Local**
